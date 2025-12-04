@@ -1,0 +1,22 @@
+{
+  "name": "proxyswither-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot for ProxySwitcher Premium subscriptions",
+  "main": "telegram-bot.js",
+  "scripts": {
+    "start": "node telegram-bot.js",
+    "dev": "nodemon telegram-bot.js"
+  },
+  "keywords": ["telegram", "bot", "proxy", "license"],
+  "author": "ProxySwitcher",
+  "license": "MIT",
+  "dependencies": {
+    "node-telegram-bot-api": "^0.66.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
