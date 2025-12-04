@@ -1,17 +1,12 @@
 /**
- * Telegram Bot for selling ProxySwitcher subscriptions
+ * Telegram Bot для продажи подписок ProxySwitcher
  *
- * To run the bot:
- * 1. Create a bot via @BotFather in Telegram
- * 2. Get the bot token
- * 3. Install dependencies: npm install node-telegram-bot-api
- * 4. Configure environment variables or edit the config below
- * 5. Run: node telegram-bot.js
- *
- * Payment options can be used:
- * - YooMoney (for Russia)
- * - Telegram Payments (Stars)
- * - Cryptocurrency
+ * Запуск:
+ * 1. Создайте бота через @BotFather в Telegram
+ * 2. Получите токен бота
+ * 3. Установите зависимости: npm install node-telegram-bot-api
+ * 4. Настройте переменные окружения или отредактируйте конфиг ниже
+ * 5. Запустите: node telegram-bot.js
  */
 
 const TelegramBot = require("node-telegram-bot-api")
@@ -19,44 +14,58 @@ const crypto = require("crypto")
 const fs = require("fs")
 const http = require("http")
 
-// Configuration
+// Конфигурация
 const CONFIG = {
-  BOT_TOKEN: process.env.BOT_TOKEN || "YOUR_BOT_TOKEN_HERE",
-  ADMIN_ID: process.env.ADMIN_ID || "YOUR_ADMIN_ID_HERE",
-  PRICE: 150, // Price in rubles
+  BOT_TOKEN: process.env.BOT_TOKEN || "8530886952:AAELDw3vMrljicbyl2Nyzwh1zDQMsCi8Jk0",
+  ADMIN_ID: process.env.ADMIN_ID || "1830230896",
+  PRICE_PREMIUM: 150, // Цена Premium подписки
+  PRICE_PROXY: 250, // Цена индивидуального прокси
   LICENSE_FILE: "./licenses.json",
   API_PORT: process.env.API_PORT || 3847,
   API_HOST: process.env.API_HOST || "0.0.0.0",
 }
 
-// Bot initialization
+// Инициализация бота
 const bot = new TelegramBot(CONFIG.BOT_TOKEN, { polling: true })
 
-// License storage
+// Хранилище лицензий
 let licenses = {}
 
-// Load licenses from file
+const pendingOrders = {}
+
+const supportTickets = {}
+
+bot.setMyCommands([
+  { command: "start", description: "Главное меню" },
+  { command: "buy", description: "Купить Premium подписку" },
+  { command: "proxy", description: "Купить индивидуальный прокси" },
+  { command: "check", description: "Проверить лицензионный ключ" },
+  { command: "support", description: "Связаться с поддержкой" }, // Добавлена команда support
+  { command: "help", description: "Помощь" },
+])
+
+// Загрузка лицензий из файла
 function loadLicenses() {
   try {
     if (fs.existsSync(CONFIG.LICENSE_FILE)) {
       licenses = JSON.parse(fs.readFileSync(CONFIG.LICENSE_FILE, "utf8"))
     }
   } catch (error) {
-    console.error("Error loading licenses:", error)
+    console.error("Ошибка загрузки лицензий:", error)
     licenses = {}
   }
 }
 
-// Save licenses to file
+// Сохранение лицензий в файл
 function saveLicenses() {
   try {
     fs.writeFileSync(CONFIG.LICENSE_FILE, JSON.stringify(licenses, null, 2))
   } catch (error) {
-    console.error("Error saving licenses:", error)
+    console.error("Ошибка сохранения лицензий:", error)
   }
 }
 
-// Generate license key
+// Генерация лицензионного ключа
 function generateLicenseKey() {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
   const generatePart = () => {
@@ -70,7 +79,7 @@ function generateLicenseKey() {
   return `PS-${generatePart()}-${generatePart()}-${generatePart()}`
 }
 
-// Create new license
+// Создание новой лицензии
 function createLicense(userId, username) {
   const key = generateLicenseKey()
   const license = {
@@ -87,183 +96,368 @@ function createLicense(userId, username) {
   return license
 }
 
-// Check license
+// Проверка лицензии
 function checkLicense(key) {
   const license = licenses[key]
-  if (!license) return { valid: false, message: "Key not found" }
-  if (license.status !== "active") return { valid: false, message: "License deactivated" }
+  if (!license) return { valid: false, message: "Ключ не найден" }
+  if (license.status !== "active") return { valid: false, message: "Лицензия деактивирована" }
   return { valid: true, license }
 }
 
-// Command /start
+function checkUserPremium(userId) {
+  for (const key in licenses) {
+    if (licenses[key].userId.toString() === userId.toString() && licenses[key].status === "active") {
+      return { hasPremium: true, license: licenses[key] }
+    }
+  }
+  return { hasPremium: false }
+}
+
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id
   const username = msg.from.username || msg.from.first_name
 
   const welcomeMessage = `
-🛡️ *Welcome to ProxySwitcher Bot!*
+Добро пожаловать в ProxySwitcher Bot!
 
-Here you can purchase a Premium subscription for the ProxySwitcher application.
+Здесь вы можете приобрести:
 
-💎 *Premium subscription - ${CONFIG.PRICE}₽*
-• Unlimited number of proxies
-• Priority support
-• Early access to new features
+1. Premium подписка - ${CONFIG.PRICE_PREMIUM} руб.
+   - Безлимитное количество прокси
+   - Приоритетная поддержка
+   - Ранний доступ к новым функциям
 
-📋 *Available commands:*
-/buy - Buy Premium subscription
-/check - Check license key
-/help - Help
+2. Индивидуальный прокси - ${CONFIG.PRICE_PROXY} руб.
+   - Персональный прокси только для вас
+   - Высокая скорость и стабильность
+   - Полная анонимность
 
-🔗 Download the application: [ProxySwitcher](https://t.me/proxyswither)
+Команды:
+/buy - Купить Premium подписку
+/proxy - Купить индивидуальный прокси
+/check - Проверить лицензионный ключ
+/support - Связаться с поддержкой
+/help - Помощь
+
+Скачать приложение: @proxyswither
   `
 
   bot.sendMessage(chatId, welcomeMessage, {
-    parse_mode: "Markdown",
     disable_web_page_preview: true,
   })
 })
 
-// Command /buy
 bot.onText(/\/buy/, (msg) => {
   const chatId = msg.chat.id
 
+  pendingOrders[msg.from.id] = { type: "premium", chatId }
+
   const buyMessage = `
-💳 *Premium subscription purchase*
+Покупка Premium подписки
 
-Cost: *${CONFIG.PRICE}₽*
+Стоимость: ${CONFIG.PRICE_PREMIUM} руб.
 
-*Payment methods:*
+Способы оплаты:
 
-1️⃣ *Bank transfer:*
-   \`4276 XXXX XXXX XXXX\` (Sberbank)
-   
-2️⃣ *YooMoney:*
-   \`4100XXXXXXXXXXXX\`
+1. Перевод на карту:
+2204320688487737 (Т-Банк)
 
-After payment, send a screenshot of the receipt or type /paid
+2. ЮMoney:
+4100119424240925
 
-⚠️ *Important:* In the transfer comment, specify your Telegram username (@${msg.from.username || "your_username"})
+После оплаты отправьте скриншот чека или нажмите "Я оплатил"
+
+Важно: В комментарии к переводу укажите ваш Telegram: @${msg.from.username || "ваш_username"}
   `
 
   const keyboard = {
     inline_keyboard: [
-      [{ text: "💳 I paid", callback_data: "paid" }],
-      [{ text: "❓ Contact support", url: "https://t.me/noname22444" }],
+      [{ text: "Я оплатил", callback_data: "paid_premium" }],
+      [{ text: "Связаться с поддержкой", url: "https://t.me/noname22444" }],
     ],
   }
 
   bot.sendMessage(chatId, buyMessage, {
-    parse_mode: "Markdown",
     reply_markup: keyboard,
   })
 })
 
-// Command /paid or button "I paid"
+bot.onText(/\/proxy/, (msg) => {
+  const chatId = msg.chat.id
+
+  pendingOrders[msg.from.id] = { type: "proxy", chatId }
+
+  const proxyMessage = `
+Покупка индивидуального прокси
+
+Стоимость: ${CONFIG.PRICE_PROXY} руб.
+
+Что вы получите:
+- Персональный SOCKS5/HTTP прокси
+- Только для вас (не shared)
+- Высокая скорость
+- Поддержка 24/7
+
+Способы оплаты:
+
+1. Перевод на карту:
+2204320688487737 (Т-Банк)
+
+2. ЮMoney:
+4100119424240925
+
+После оплаты отправьте скриншот чека или нажмите "Я оплатил"
+
+Важно: В комментарии укажите ваш Telegram: @${msg.from.username || "ваш_username"}
+  `
+
+  const keyboard = {
+    inline_keyboard: [
+      [{ text: "Я оплатил", callback_data: "paid_proxy" }],
+      [{ text: "Связаться с поддержкой", url: "https://t.me/noname22444" }],
+    ],
+  }
+
+  bot.sendMessage(chatId, proxyMessage, {
+    reply_markup: keyboard,
+  })
+})
+
+// Команда /paid или кнопка "Я оплатил"
 bot.onText(/\/paid/, (msg) => {
   handlePaymentConfirmation(msg.chat.id, msg.from)
 })
 
 bot.on("callback_query", (query) => {
-  if (query.data === "paid") {
-    handlePaymentConfirmation(query.message.chat.id, query.from)
+  if (query.data === "cancel_support") {
+    delete supportTickets[query.from.id]
+    bot.sendMessage(query.message.chat.id, "Обращение отменено. Если понадобится помощь - напишите /support")
+    bot.answerCallbackQuery(query.id)
+    return
+  }
+
+  if (query.data === "paid" || query.data === "paid_premium") {
+    pendingOrders[query.from.id] = { type: "premium", chatId: query.message.chat.id }
+    handlePaymentConfirmation(query.message.chat.id, query.from, "premium")
+    bot.answerCallbackQuery(query.id)
+  } else if (query.data === "paid_proxy") {
+    pendingOrders[query.from.id] = { type: "proxy", chatId: query.message.chat.id }
+    handlePaymentConfirmation(query.message.chat.id, query.from, "proxy")
     bot.answerCallbackQuery(query.id)
   } else if (query.data.startsWith("approve_")) {
-    const [, userId, chatId] = query.data.split("_")
-    handleApproval(query, userId, chatId, true)
+    const parts = query.data.split("_")
+    const type = parts[1]
+    const userId = parts[2]
+    const chatId = parts[3]
+    handleApproval(query, userId, chatId, true, type)
   } else if (query.data.startsWith("reject_")) {
-    const [, userId, chatId] = query.data.split("_")
-    handleApproval(query, userId, chatId, false)
+    const parts = query.data.split("_")
+    const type = parts[1]
+    const userId = parts[2]
+    const chatId = parts[3]
+    handleApproval(query, userId, chatId, false, type)
+  } else if (query.data.startsWith("reply_support_")) {
+    const parts = query.data.split("_")
+    const targetUserId = parts[2]
+    const targetChatId = parts[3]
+
+    supportTickets[`admin_reply_${query.from.id}`] = {
+      targetUserId,
+      targetChatId,
+    }
+
+    bot.sendMessage(query.message.chat.id, `Введите ответ пользователю ${targetUserId}:`)
+    bot.answerCallbackQuery(query.id)
+  } else if (query.data.startsWith("close_ticket_")) {
+    const parts = query.data.split("_")
+    const targetUserId = parts[2]
+    const targetChatId = parts[3]
+
+    delete supportTickets[targetUserId]
+
+    bot.sendMessage(targetChatId, "Ваше обращение закрыто. Если у вас остались вопросы - напишите /support")
+    bot.editMessageText("Тикет закрыт", {
+      chat_id: query.message.chat.id,
+      message_id: query.message.message_id,
+    })
+    bot.answerCallbackQuery(query.id)
   }
 })
 
-function handlePaymentConfirmation(chatId, user) {
+function handlePaymentConfirmation(chatId, user, type = "premium") {
+  const productName = type === "proxy" ? "индивидуального прокси" : "Premium подписки"
+
   const confirmMessage = `
-📤 *Payment confirmation*
+Подтверждение оплаты ${productName}
 
-Please send a screenshot of the receipt.
+Пожалуйста, отправьте скриншот чека об оплате.
 
-After verification by the administrator, you will receive a license key.
+После проверки администратором вы получите ${type === "proxy" ? "данные прокси" : "лицензионный ключ"}.
 
-⏱️ Usually, verification takes up to 30 minutes.
+Обычно проверка занимает до 30 минут.
   `
 
-  bot.sendMessage(chatId, confirmMessage, { parse_mode: "Markdown" })
+  bot.sendMessage(chatId, confirmMessage)
 
-  // Notify admin
+  const price = type === "proxy" ? CONFIG.PRICE_PROXY : CONFIG.PRICE_PREMIUM
+
+  // Уведомление админа
   const adminMessage = `
-🔔 *New payment request!*
+Новая заявка на оплату!
 
-👤 User: @${user.username || "unknown"} (${user.first_name})
-🆔 ID: ${user.id}
-📅 Date: ${new Date().toLocaleString("ru-RU")}
+Тип: ${type === "proxy" ? "Индивидуальный прокси" : "Premium подписка"}
+Сумма: ${price} руб.
+Пользователь: @${user.username || "неизвестен"} (${user.first_name})
+ID: ${user.id}
+Дата: ${new Date().toLocaleString("ru-RU")}
   `
 
   const adminKeyboard = {
     inline_keyboard: [
       [
-        { text: "✅ Approve", callback_data: `approve_${user.id}_${chatId}` },
-        { text: "❌ Reject", callback_data: `reject_${user.id}_${chatId}` },
+        { text: "Подтвердить", callback_data: `approve_${type}_${user.id}_${chatId}` },
+        { text: "Отклонить", callback_data: `reject_${type}_${user.id}_${chatId}` },
       ],
     ],
   }
 
   bot.sendMessage(CONFIG.ADMIN_ID, adminMessage, {
-    parse_mode: "Markdown",
     reply_markup: adminKeyboard,
   })
 }
 
-function handleApproval(query, userId, chatId, approved) {
+function handleApproval(query, userId, chatId, approved, type = "premium") {
   if (query.from.id.toString() !== CONFIG.ADMIN_ID.toString()) {
-    bot.answerCallbackQuery(query.id, { text: "You do not have permission" })
+    bot.answerCallbackQuery(query.id, { text: "У вас нет прав" })
     return
   }
 
+  const isMediaMessage = query.message.photo || query.message.document
+
   if (approved) {
-    // Create license
-    const license = createLicense(userId, query.from.username)
+    if (type === "proxy") {
+      // Для прокси отправляем запрос админу ввести данные прокси
+      bot.sendMessage(
+        CONFIG.ADMIN_ID,
+        `Введите данные прокси для пользователя ${userId} в формате:\n/sendproxy ${userId} ${chatId} IP:PORT:LOGIN:PASSWORD`,
+      )
 
-    // Send key to user
-    const userMessage = `
-🎉 *Congratulations on purchasing Premium!*
+      const waitText = `Заявка одобрена!\nОжидается отправка данных прокси пользователю ${userId}`
 
-Your license key:
-\`${license.key}\`
+      if (isMediaMessage) {
+        bot
+          .editMessageCaption(waitText, {
+            chat_id: query.message.chat.id,
+            message_id: query.message.message_id,
+          })
+          .catch(() => {
+            bot.sendMessage(query.message.chat.id, waitText)
+          })
+      } else {
+        bot.editMessageText(waitText, {
+          chat_id: query.message.chat.id,
+          message_id: query.message.message_id,
+        })
+      }
+    } else {
+      // Для Premium создаем лицензию
+      const license = createLicense(userId, query.from.username)
 
-📋 *How to activate:*
-1. Open the ProxySwitcher application
-2. Click on "Premium"
-3. Enter the key and click "Activate"
+      const userMessage = `
+Поздравляем с покупкой Premium!
 
-Thank you for your purchase! 💎
-    `
+Ваш лицензионный ключ:
+${license.key}
 
-    bot.sendMessage(chatId, userMessage, { parse_mode: "Markdown" })
+Как активировать:
+1. Откройте приложение ProxySwitcher
+2. Нажмите кнопку "Premium"
+3. Введите ключ и нажмите "Активировать"
 
-    // Notify admin
-    bot.editMessageText(`✅ License issued!\n\nKey: \`${license.key}\`\nUser: ${userId}`, {
-      chat_id: query.message.chat.id,
-      message_id: query.message.message_id,
-      parse_mode: "Markdown",
-    })
+Спасибо за покупку!
+      `
+
+      bot.sendMessage(chatId, userMessage)
+
+      const successText = `Лицензия выдана!\n\nКлюч: ${license.key}\nПользователь: ${userId}`
+
+      if (isMediaMessage) {
+        bot
+          .editMessageCaption(successText, {
+            chat_id: query.message.chat.id,
+            message_id: query.message.message_id,
+          })
+          .catch(() => {
+            bot.sendMessage(query.message.chat.id, successText)
+          })
+      } else {
+        bot.editMessageText(successText, {
+          chat_id: query.message.chat.id,
+          message_id: query.message.message_id,
+        })
+      }
+    }
   } else {
-    // Reject
-    bot.sendMessage(
-      chatId,
-      "❌ Unfortunately, your payment has not been confirmed. Please contact support @noname22444",
-    )
+    bot.sendMessage(chatId, "К сожалению, ваш платеж не подтвержден. Пожалуйста, свяжитесь с поддержкой @noname22444")
 
-    bot.editMessageText("❌ Request rejected", {
-      chat_id: query.message.chat.id,
-      message_id: query.message.message_id,
-    })
+    const rejectText = "Заявка отклонена"
+
+    if (isMediaMessage) {
+      bot
+        .editMessageCaption(rejectText, {
+          chat_id: query.message.chat.id,
+          message_id: query.message.message_id,
+        })
+        .catch(() => {
+          bot.sendMessage(query.message.chat.id, rejectText)
+        })
+    } else {
+      bot.editMessageText(rejectText, {
+        chat_id: query.message.chat.id,
+        message_id: query.message.message_id,
+      })
+    }
   }
 
   bot.answerCallbackQuery(query.id)
 }
 
-// Command /check - check key
+bot.onText(/\/sendproxy (\d+) (\d+) (.+)/, (msg, match) => {
+  if (msg.from.id.toString() !== CONFIG.ADMIN_ID.toString()) return
+
+  const userId = match[1]
+  const chatId = match[2]
+  const proxyData = match[3] // IP:PORT:LOGIN:PASSWORD
+
+  const parts = proxyData.split(":")
+  if (parts.length < 2) {
+    bot.sendMessage(msg.chat.id, "Неверный формат. Используйте: /sendproxy USER_ID CHAT_ID IP:PORT:LOGIN:PASSWORD")
+    return
+  }
+
+  const proxyMessage = `
+Ваш индивидуальный прокси готов!
+
+Данные для подключения:
+IP: ${parts[0]}
+Порт: ${parts[1]}
+${parts[2] ? `Логин: ${parts[2]}` : ""}
+${parts[3] ? `Пароль: ${parts[3]}` : ""}
+
+Как подключить:
+1. Откройте ProxySwitcher
+2. Нажмите "Добавить"
+3. Введите данные прокси
+4. Нажмите "Подключить"
+
+Спасибо за покупку!
+По вопросам: @noname22444
+  `
+
+  bot.sendMessage(chatId, proxyMessage)
+  bot.sendMessage(msg.chat.id, `Прокси отправлен пользователю ${userId}`)
+})
+
 bot.onText(/\/check (.+)/, (msg, match) => {
   const chatId = msg.chat.id
   const key = match[1].trim().toUpperCase()
@@ -271,45 +465,221 @@ bot.onText(/\/check (.+)/, (msg, match) => {
   const result = checkLicense(key)
 
   if (result.valid) {
-    bot.sendMessage(chatId, `✅ *License is valid!*\n\nStatus: Active\nCreated: ${result.license.createdAt}`, {
-      parse_mode: "Markdown",
-    })
+    bot.sendMessage(chatId, `Лицензия действительна!\n\nСтатус: Активна\nСоздана: ${result.license.createdAt}`)
   } else {
-    bot.sendMessage(chatId, `❌ *License is invalid*\n\n${result.message}`, { parse_mode: "Markdown" })
+    bot.sendMessage(chatId, `Лицензия недействительна\n\n${result.message}`)
   }
 })
 
-// Command /help
+bot.onText(/^\/check$/, (msg) => {
+  const chatId = msg.chat.id
+  bot.sendMessage(chatId, "Для проверки ключа введите:\n/check ВАШ-КЛЮЧ\n\nНапример:\n/check PS-XXXXX-XXXXX-XXXXX")
+})
+
+bot.onText(/\/support/, (msg) => {
+  const chatId = msg.chat.id
+  const userId = msg.from.id
+
+  // Активируем режим поддержки для пользователя
+  supportTickets[userId] = {
+    chatId: chatId,
+    username: msg.from.username || msg.from.first_name,
+    startedAt: new Date().toISOString(),
+    messages: [],
+  }
+
+  const premiumStatus = checkUserPremium(userId)
+
+  let supportMessage = `
+Поддержка ProxySwitcher
+
+Опишите вашу проблему или вопрос в следующем сообщении.
+
+Администратор ответит вам в ближайшее время.
+`
+
+  if (premiumStatus.hasPremium) {
+    supportMessage = `
+Поддержка ProxySwitcher
+
+Вы Premium пользователь! Ваше обращение будет рассмотрено в приоритетном порядке.
+
+Опишите вашу проблему или вопрос в следующем сообщении.
+`
+  }
+
+  const keyboard = {
+    inline_keyboard: [[{ text: "Отменить обращение", callback_data: "cancel_support" }]],
+  }
+
+  bot.sendMessage(chatId, supportMessage, { reply_markup: keyboard })
+})
+
+bot.on("text", (msg) => {
+  // Пропускаем команды
+  if (msg.text.startsWith("/")) return
+
+  const userId = msg.from.id
+  const chatId = msg.chat.id
+
+  // Проверяем, есть ли у админа активный ответ
+  const adminReply = supportTickets[`admin_reply_${userId}`]
+  if (adminReply && userId.toString() === CONFIG.ADMIN_ID.toString()) {
+    // Отправляем ответ пользователю
+    bot.sendMessage(adminReply.targetChatId, `Ответ от поддержки:\n\n${msg.text}`)
+    bot.sendMessage(chatId, "Ответ отправлен пользователю!")
+    delete supportTickets[`admin_reply_${userId}`]
+    return
+  }
+
+  // Проверяем, есть ли активный тикет поддержки
+  if (supportTickets[userId]) {
+    const ticket = supportTickets[userId]
+    const premiumStatus = checkUserPremium(userId)
+
+    // Формируем сообщение для админа
+    let adminMessage = `
+Новое обращение в поддержку!
+
+`
+
+    if (premiumStatus.hasPremium) {
+      adminMessage += `ПРИОРИТЕТ: Premium пользователь\n\n`
+    }
+
+    adminMessage += `От: @${ticket.username} (ID: ${userId})
+Дата: ${new Date().toLocaleString("ru-RU")}
+
+Сообщение:
+${msg.text}`
+
+    const adminKeyboard = {
+      inline_keyboard: [
+        [
+          { text: "Ответить", callback_data: `reply_support_${userId}_${chatId}` },
+          { text: "Закрыть тикет", callback_data: `close_ticket_${userId}_${chatId}` },
+        ],
+      ],
+    }
+
+    bot.sendMessage(CONFIG.ADMIN_ID, adminMessage, { reply_markup: adminKeyboard })
+    bot.sendMessage(chatId, "Ваше сообщение отправлено в поддержку! Ожидайте ответа.")
+
+    // Очищаем тикет после отправки
+    delete supportTickets[userId]
+    return
+  }
+})
+
 bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id
 
   const helpMessage = `
-📚 *Help for ProxySwitcher Bot*
+Помощь по ProxySwitcher Bot
 
-*Commands:*
-/start - Main menu
-/buy - Buy Premium subscription
-/check <key> - Check license key
-/help - This help
+Товары:
+- Premium подписка (${CONFIG.PRICE_PREMIUM} руб.) - безлимит прокси в приложении
+- Индивидуальный прокси (${CONFIG.PRICE_PROXY} руб.) - персональный прокси только для вас
 
-*Problems?*
-Write to support: @noname22444
+Команды:
+/start - Главное меню
+/buy - Купить Premium подписку
+/proxy - Купить индивидуальный прокси
+/check <ключ> - Проверить лицензионный ключ
+/support - Связаться с поддержкой
+/help - Эта справка
 
-*About the application:*
-ProxySwitcher - a simple and convenient application for managing proxy servers on Windows.
+Возникли проблемы?
+Напишите в поддержку: @noname22444
 
-🔗 Telegram channel: @proxyswither
+Telegram канал: @proxyswither
   `
 
-  bot.sendMessage(chatId, helpMessage, { parse_mode: "Markdown" })
+  bot.sendMessage(chatId, helpMessage)
 })
 
-// Admin commands
+// Обработка фото с определением типа заказа
+bot.on("photo", (msg) => {
+  const chatId = msg.chat.id
+  const user = msg.from
+  const photo = msg.photo[msg.photo.length - 1]
+
+  // Определяем тип заказа
+  const order = pendingOrders[user.id] || { type: "premium" }
+  const productName = order.type === "proxy" ? "индивидуального прокси" : "Premium подписки"
+  const price = order.type === "proxy" ? CONFIG.PRICE_PROXY : CONFIG.PRICE_PREMIUM
+
+  bot.sendMessage(chatId, `Скриншот получен! Ожидайте проверки администратором. Обычно это занимает до 30 минут.`)
+
+  const adminCaption = `
+Новый скриншот чека!
+
+Тип: ${order.type === "proxy" ? "Индивидуальный прокси" : "Premium подписка"}
+Сумма: ${price} руб.
+Пользователь: @${user.username || "неизвестен"} (${user.first_name})
+ID: ${user.id}
+Дата: ${new Date().toLocaleString("ru-RU")}
+  `
+
+  const adminKeyboard = {
+    inline_keyboard: [
+      [
+        { text: "Подтвердить оплату", callback_data: `approve_${order.type}_${user.id}_${chatId}` },
+        { text: "Отклонить", callback_data: `reject_${order.type}_${user.id}_${chatId}` },
+      ],
+    ],
+  }
+
+  bot.sendPhoto(CONFIG.ADMIN_ID, photo.file_id, {
+    caption: adminCaption,
+    reply_markup: adminKeyboard,
+  })
+})
+
+// Обработка документов с определением типа заказа
+bot.on("document", (msg) => {
+  const chatId = msg.chat.id
+  const user = msg.from
+  const doc = msg.document
+
+  if (doc.mime_type && doc.mime_type.startsWith("image/")) {
+    const order = pendingOrders[user.id] || { type: "premium" }
+    const price = order.type === "proxy" ? CONFIG.PRICE_PROXY : CONFIG.PRICE_PREMIUM
+
+    bot.sendMessage(chatId, "Файл получен! Ожидайте проверки администратором.")
+
+    const adminCaption = `
+Новый файл чека!
+
+Тип: ${order.type === "proxy" ? "Индивидуальный прокси" : "Premium подписка"}
+Сумма: ${price} руб.
+Пользователь: @${user.username || "неизвестен"} (${user.first_name})
+ID: ${user.id}
+Файл: ${doc.file_name}
+Дата: ${new Date().toLocaleString("ru-RU")}
+    `
+
+    const adminKeyboard = {
+      inline_keyboard: [
+        [
+          { text: "Подтвердить оплату", callback_data: `approve_${order.type}_${user.id}_${chatId}` },
+          { text: "Отклонить", callback_data: `reject_${order.type}_${user.id}_${chatId}` },
+        ],
+      ],
+    }
+
+    bot.sendDocument(CONFIG.ADMIN_ID, doc.file_id, {
+      caption: adminCaption,
+      reply_markup: adminKeyboard,
+    })
+  }
+})
+
 bot.onText(/\/admin_generate/, (msg) => {
   if (msg.from.id.toString() !== CONFIG.ADMIN_ID.toString()) return
 
   const license = createLicense(msg.from.id, msg.from.username)
-  bot.sendMessage(msg.chat.id, `🔑 New key generated:\n\`${license.key}\``, { parse_mode: "Markdown" })
+  bot.sendMessage(msg.chat.id, `Новый ключ сгенерирован:\n${license.key}`)
 })
 
 bot.onText(/\/admin_stats/, (msg) => {
@@ -318,22 +688,14 @@ bot.onText(/\/admin_stats/, (msg) => {
   const totalLicenses = Object.keys(licenses).length
   const activeLicenses = Object.values(licenses).filter((l) => l.status === "active").length
 
-  bot.sendMessage(
-    msg.chat.id,
-    `
-📊 *Statistics:*
-Total licenses: ${totalLicenses}
-Active: ${activeLicenses}
-  `,
-    { parse_mode: "Markdown" },
-  )
+  bot.sendMessage(msg.chat.id, `Статистика:\nВсего лицензий: ${totalLicenses}\nАктивных: ${activeLicenses}`)
 })
 
-// Load licenses at startup
+// Загружаем лицензии при запуске
 loadLicenses()
 
 const apiServer = http.createServer((req, res) => {
-  // CORS headers
+  // CORS заголовки
   res.setHeader("Access-Control-Allow-Origin", "*")
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
   res.setHeader("Access-Control-Allow-Headers", "Content-Type")
@@ -351,7 +713,7 @@ const apiServer = http.createServer((req, res) => {
 
     if (!key) {
       res.writeHead(400, { "Content-Type": "application/json" })
-      res.end(JSON.stringify({ valid: false, error: "Key required" }))
+      res.end(JSON.stringify({ valid: false, error: "Ключ не указан" }))
       return
     }
 
@@ -375,7 +737,7 @@ const apiServer = http.createServer((req, res) => {
         res.end(JSON.stringify(result))
       } catch (e) {
         res.writeHead(400, { "Content-Type": "application/json" })
-        res.end(JSON.stringify({ valid: false, error: "Invalid request" }))
+        res.end(JSON.stringify({ valid: false, error: "Неверный запрос" }))
       }
     })
     return
@@ -383,12 +745,12 @@ const apiServer = http.createServer((req, res) => {
 
   // 404
   res.writeHead(404, { "Content-Type": "application/json" })
-  res.end(JSON.stringify({ error: "Not found" }))
+  res.end(JSON.stringify({ error: "Не найдено" }))
 })
 
 apiServer.listen(CONFIG.API_PORT, CONFIG.API_HOST, () => {
-  console.log(`📡 License API running on http://${CONFIG.API_HOST}:${CONFIG.API_PORT}`)
-  console.log(`📡 For production, set your server IP in the app config`)
+  console.log(`API лицензий запущен на http://${CONFIG.API_HOST}:${CONFIG.API_PORT}`)
 })
 
-console.log("🤖 ProxySwitcher Bot started!")
+console.log("ProxySwitcher Bot запущен!")
+console.log("Команды бота установлены в меню Telegram")
