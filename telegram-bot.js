@@ -13,6 +13,7 @@ const TelegramBot = require("node-telegram-bot-api")
 const crypto = require("crypto")
 const fs = require("fs")
 const http = require("http")
+const fetch = require("node-fetch") // Added for GitHub API
 
 // Конфигурация
 const CONFIG = {
@@ -21,7 +22,7 @@ const CONFIG = {
   PRICE_PREMIUM: 250, // Цена Premium подписки
   PRICE_PROXY: 150, // Цена индивидуального прокси
   LICENSE_FILE: "./licenses.json",
-  API_PORT: process.env.API_PORT || 3847,
+  API_PORT: process.env.API_PORT || 80, // изменил порт с 3847 на 80
   API_HOST: process.env.API_HOST || "0.0.0.0",
 }
 
@@ -65,8 +66,68 @@ function loadLicenses() {
 function saveLicenses() {
   try {
     fs.writeFileSync(CONFIG.LICENSE_FILE, JSON.stringify(licenses, null, 2))
+    syncLicensesToGitHub()
   } catch (error) {
     console.error("Ошибка сохранения лицензий:", error)
+  }
+}
+
+async function syncLicensesToGitHub() {
+  const GITHUB_TOKEN = process.env.GITHUB_TOKEN
+  if (!GITHUB_TOKEN) {
+    console.log("GITHUB_TOKEN не настроен, синхронизация пропущена")
+    return
+  }
+
+  const GITHUB_USER = "Nikita2888"
+  const GITHUB_REPO = "v0app"
+  const FILE_PATH = "licenses.json"
+
+  try {
+    // Получаем текущий файл для получения SHA
+    const getResponse = await fetch(
+      `https://api.github.com/repos/${GITHUB_USER}/${GITHUB_REPO}/contents/${FILE_PATH}`,
+      {
+        headers: {
+          Authorization: `token ${GITHUB_TOKEN}`,
+          Accept: "application/vnd.github.v3+json",
+        },
+      },
+    )
+
+    let sha = null
+    if (getResponse.ok) {
+      const fileData = await getResponse.json()
+      sha = fileData.sha
+    }
+
+    // Обновляем файл
+    const content = Buffer.from(JSON.stringify(licenses, null, 2)).toString("base64")
+
+    const updateResponse = await fetch(
+      `https://api.github.com/repos/${GITHUB_USER}/${GITHUB_REPO}/contents/${FILE_PATH}`,
+      {
+        method: "PUT",
+        headers: {
+          Authorization: `token ${GITHUB_TOKEN}`,
+          Accept: "application/vnd.github.v3+json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          message: "Update licenses",
+          content: content,
+          sha: sha,
+        }),
+      },
+    )
+
+    if (updateResponse.ok) {
+      console.log("Лицензии синхронизированы с GitHub")
+    } else {
+      console.error("Ошибка синхронизации с GitHub:", await updateResponse.text())
+    }
+  } catch (error) {
+    console.error("Ошибка синхронизации с GitHub:", error.message)
   }
 }
 
