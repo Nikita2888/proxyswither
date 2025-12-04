@@ -13,7 +13,7 @@ const TelegramBot = require("node-telegram-bot-api")
 const crypto = require("crypto")
 const fs = require("fs")
 const http = require("http")
-const fetch = require("node-fetch") // Added for GitHub API
+const https = require("https") // Заменил node-fetch на встроенный https
 
 // Конфигурация
 const CONFIG = {
@@ -72,6 +72,35 @@ function saveLicenses() {
   }
 }
 
+function httpsRequest(options, postData = null) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(options, (res) => {
+      let data = ""
+      res.on("data", (chunk) => (data += chunk))
+      res.on("end", () => {
+        try {
+          resolve({
+            ok: res.statusCode >= 200 && res.statusCode < 300,
+            status: res.statusCode,
+            json: () => JSON.parse(data),
+            text: () => data,
+          })
+        } catch (e) {
+          resolve({
+            ok: res.statusCode >= 200 && res.statusCode < 300,
+            status: res.statusCode,
+            json: () => ({}),
+            text: () => data,
+          })
+        }
+      })
+    })
+    req.on("error", reject)
+    if (postData) req.write(postData)
+    req.end()
+  })
+}
+
 async function syncLicensesToGitHub() {
   const GITHUB_TOKEN = process.env.GITHUB_TOKEN
   if (!GITHUB_TOKEN) {
@@ -85,46 +114,52 @@ async function syncLicensesToGitHub() {
 
   try {
     // Получаем текущий файл для получения SHA
-    const getResponse = await fetch(
-      `https://api.github.com/repos/${GITHUB_USER}/${GITHUB_REPO}/contents/${FILE_PATH}`,
-      {
-        headers: {
-          Authorization: `token ${GITHUB_TOKEN}`,
-          Accept: "application/vnd.github.v3+json",
-        },
+    const getOptions = {
+      hostname: "api.github.com",
+      path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/contents/${FILE_PATH}`,
+      method: "GET",
+      headers: {
+        Authorization: `token ${GITHUB_TOKEN}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "ProxySwitcher-Bot",
       },
-    )
+    }
+
+    const getResponse = await httpsRequest(getOptions)
 
     let sha = null
     if (getResponse.ok) {
-      const fileData = await getResponse.json()
+      const fileData = getResponse.json()
       sha = fileData.sha
     }
 
     // Обновляем файл
     const content = Buffer.from(JSON.stringify(licenses, null, 2)).toString("base64")
+    const body = JSON.stringify({
+      message: "Update licenses",
+      content: content,
+      sha: sha,
+    })
 
-    const updateResponse = await fetch(
-      `https://api.github.com/repos/${GITHUB_USER}/${GITHUB_REPO}/contents/${FILE_PATH}`,
-      {
-        method: "PUT",
-        headers: {
-          Authorization: `token ${GITHUB_TOKEN}`,
-          Accept: "application/vnd.github.v3+json",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          message: "Update licenses",
-          content: content,
-          sha: sha,
-        }),
+    const updateOptions = {
+      hostname: "api.github.com",
+      path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/contents/${FILE_PATH}`,
+      method: "PUT",
+      headers: {
+        Authorization: `token ${GITHUB_TOKEN}`,
+        Accept: "application/vnd.github.v3+json",
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+        "User-Agent": "ProxySwitcher-Bot",
       },
-    )
+    }
+
+    const updateResponse = await httpsRequest(updateOptions, body)
 
     if (updateResponse.ok) {
       console.log("Лицензии синхронизированы с GitHub")
     } else {
-      console.error("Ошибка синхронизации с GitHub:", await updateResponse.text())
+      console.error("Ошибка синхронизации с GitHub:", updateResponse.text())
     }
   } catch (error) {
     console.error("Ошибка синхронизации с GitHub:", error.message)
