@@ -82,11 +82,15 @@ function generateLicenseKey() {
 // Создание новой лицензии
 function createLicense(userId, username) {
   const key = generateLicenseKey()
+  const now = new Date()
+  const expiresAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000) // +30 дней
+
   const license = {
     key,
     userId,
     username,
-    createdAt: new Date().toISOString(),
+    createdAt: now.toISOString(),
+    expiresAt: expiresAt.toISOString(),
     status: "active",
   }
 
@@ -101,13 +105,34 @@ function checkLicense(key) {
   const license = licenses[key]
   if (!license) return { valid: false, message: "Ключ не найден" }
   if (license.status !== "active") return { valid: false, message: "Лицензия деактивирована" }
+
+  // Проверка срока действия
+  if (license.expiresAt) {
+    const expiresDate = new Date(license.expiresAt)
+    if (new Date() > expiresDate) {
+      license.status = "expired"
+      saveLicenses()
+      return { valid: false, message: "Срок действия лицензии истёк", expired: true }
+    }
+  }
+
   return { valid: true, license }
 }
 
 function checkUserPremium(userId) {
   for (const key in licenses) {
-    if (licenses[key].userId.toString() === userId.toString() && licenses[key].status === "active") {
-      return { hasPremium: true, license: licenses[key] }
+    const license = licenses[key]
+    if (license.userId.toString() === userId.toString() && license.status === "active") {
+      // Проверяем срок действия
+      if (license.expiresAt) {
+        const expiresDate = new Date(license.expiresAt)
+        if (new Date() > expiresDate) {
+          license.status = "expired"
+          saveLicenses()
+          continue
+        }
+      }
+      return { hasPremium: true, license }
     }
   }
   return { hasPremium: false }
@@ -122,10 +147,11 @@ bot.onText(/\/start/, (msg) => {
 
 Здесь вы можете приобрести:
 
-1. Premium подписка - ${CONFIG.PRICE_PREMIUM} руб.
+1. Premium подписка - ${CONFIG.PRICE_PREMIUM} руб./мес
    - Безлимитное количество прокси
    - Приоритетная поддержка
    - Ранний доступ к новым функциям
+   - Срок действия: 30 дней
 
 2. Индивидуальный прокси - ${CONFIG.PRICE_PROXY} руб.
    - Персональный прокси только для вас
@@ -155,7 +181,13 @@ bot.onText(/\/buy/, (msg) => {
   const buyMessage = `
 Покупка Premium подписки
 
-Стоимость: ${CONFIG.PRICE_PREMIUM} руб.
+Стоимость: ${CONFIG.PRICE_PREMIUM} руб./месяц
+Срок действия: 30 дней
+
+Что вы получите:
+- Безлимитное количество прокси
+- Приоритетная поддержка
+- Ранний доступ к новым функциям
 
 Способы оплаты:
 
@@ -336,7 +368,6 @@ function handleApproval(query, userId, chatId, approved, type = "premium") {
 
   if (approved) {
     if (type === "proxy") {
-      // Для прокси отправляем запрос админу ввести данные прокси
       bot.sendMessage(
         CONFIG.ADMIN_ID,
         `Введите данные прокси для пользователя ${userId} в формате:\n/sendproxy ${userId} ${chatId} IP:PORT:LOGIN:PASSWORD`,
@@ -360,8 +391,8 @@ function handleApproval(query, userId, chatId, approved, type = "premium") {
         })
       }
     } else {
-      // Для Premium создаем лицензию
       const license = createLicense(userId, query.from.username)
+      const expiresDate = new Date(license.expiresAt).toLocaleDateString("ru-RU")
 
       const userMessage = `
 Поздравляем с покупкой Premium!
@@ -369,17 +400,21 @@ function handleApproval(query, userId, chatId, approved, type = "premium") {
 Ваш лицензионный ключ:
 ${license.key}
 
+Срок действия до: ${expiresDate}
+
 Как активировать:
 1. Откройте приложение ProxySwitcher
 2. Нажмите кнопку "Premium"
 3. Введите ключ и нажмите "Активировать"
+
+За 3 дня до окончания подписки вы получите напоминание о продлении.
 
 Спасибо за покупку!
       `
 
       bot.sendMessage(chatId, userMessage)
 
-      const successText = `Лицензия выдана!\n\nКлюч: ${license.key}\nПользователь: ${userId}`
+      const successText = `Лицензия выдана!\n\nКлюч: ${license.key}\nПользователь: ${userId}\nДействует до: ${expiresDate}`
 
       if (isMediaMessage) {
         bot
@@ -465,9 +500,19 @@ bot.onText(/\/check (.+)/, (msg, match) => {
   const result = checkLicense(key)
 
   if (result.valid) {
-    bot.sendMessage(chatId, `Лицензия действительна!\n\nСтатус: Активна\nСоздана: ${result.license.createdAt}`)
+    const expiresDate = new Date(result.license.expiresAt).toLocaleDateString("ru-RU")
+    const daysLeft = Math.ceil((new Date(result.license.expiresAt) - new Date()) / (1000 * 60 * 60 * 24))
+
+    bot.sendMessage(
+      chatId,
+      `Лицензия действительна!\n\nСтатус: Активна\nСоздана: ${result.license.createdAt}\nДействует до: ${expiresDate}\nОсталось дней: ${daysLeft}`,
+    )
   } else {
-    bot.sendMessage(chatId, `Лицензия недействительна\n\n${result.message}`)
+    let message = `Лицензия недействительна\n\n${result.message}`
+    if (result.expired) {
+      message += `\n\nДля продления подписки используйте команду /buy`
+    }
+    bot.sendMessage(chatId, message)
   }
 })
 
@@ -480,7 +525,6 @@ bot.onText(/\/support/, (msg) => {
   const chatId = msg.chat.id
   const userId = msg.from.id
 
-  // Активируем режим поддержки для пользователя
   supportTickets[userId] = {
     chatId: chatId,
     username: msg.from.username || msg.from.first_name,
@@ -516,28 +560,23 @@ bot.onText(/\/support/, (msg) => {
 })
 
 bot.on("text", (msg) => {
-  // Пропускаем команды
   if (msg.text.startsWith("/")) return
 
   const userId = msg.from.id
   const chatId = msg.chat.id
 
-  // Проверяем, есть ли у админа активный ответ
   const adminReply = supportTickets[`admin_reply_${userId}`]
   if (adminReply && userId.toString() === CONFIG.ADMIN_ID.toString()) {
-    // Отправляем ответ пользователю
     bot.sendMessage(adminReply.targetChatId, `Ответ от поддержки:\n\n${msg.text}`)
     bot.sendMessage(chatId, "Ответ отправлен пользователю!")
     delete supportTickets[`admin_reply_${userId}`]
     return
   }
 
-  // Проверяем, есть ли активный тикет поддержки
   if (supportTickets[userId]) {
     const ticket = supportTickets[userId]
     const premiumStatus = checkUserPremium(userId)
 
-    // Формируем сообщение для админа
     let adminMessage = `
 Новое обращение в поддержку!
 
@@ -565,7 +604,6 @@ ${msg.text}`
     bot.sendMessage(CONFIG.ADMIN_ID, adminMessage, { reply_markup: adminKeyboard })
     bot.sendMessage(chatId, "Ваше сообщение отправлено в поддержку! Ожидайте ответа.")
 
-    // Очищаем тикет после отправки
     delete supportTickets[userId]
     return
   }
@@ -578,7 +616,7 @@ bot.onText(/\/help/, (msg) => {
 Помощь по ProxySwitcher Bot
 
 Товары:
-- Premium подписка (${CONFIG.PRICE_PREMIUM} руб.) - безлимит прокси в приложении
+- Premium подписка (${CONFIG.PRICE_PREMIUM} руб./мес) - безлимит прокси на 30 дней
 - Индивидуальный прокси (${CONFIG.PRICE_PROXY} руб.) - персональный прокси только для вас
 
 Команды:
@@ -598,15 +636,12 @@ Telegram канал: @proxyswither
   bot.sendMessage(chatId, helpMessage)
 })
 
-// Обработка фото с определением типа заказа
 bot.on("photo", (msg) => {
   const chatId = msg.chat.id
   const user = msg.from
   const photo = msg.photo[msg.photo.length - 1]
 
-  // Определяем тип заказа
   const order = pendingOrders[user.id] || { type: "premium" }
-  const productName = order.type === "proxy" ? "индивидуального прокси" : "Premium подписки"
   const price = order.type === "proxy" ? CONFIG.PRICE_PROXY : CONFIG.PRICE_PREMIUM
 
   bot.sendMessage(chatId, `Скриншот получен! Ожидайте проверки администратором. Обычно это занимает до 30 минут.`)
@@ -636,7 +671,6 @@ ID: ${user.id}
   })
 })
 
-// Обработка документов с определением типа заказа
 bot.on("document", (msg) => {
   const chatId = msg.chat.id
   const user = msg.from
@@ -691,11 +725,9 @@ bot.onText(/\/admin_stats/, (msg) => {
   bot.sendMessage(msg.chat.id, `Статистика:\nВсего лицензий: ${totalLicenses}\nАктивных: ${activeLicenses}`)
 })
 
-// Загружаем лицензии при запуске
 loadLicenses()
 
 const apiServer = http.createServer((req, res) => {
-  // CORS заголовки
   res.setHeader("Access-Control-Allow-Origin", "*")
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
   res.setHeader("Access-Control-Allow-Headers", "Content-Type")
@@ -706,7 +738,6 @@ const apiServer = http.createServer((req, res) => {
     return
   }
 
-  // API: Проверка лицензии GET /check?key=PS-XXXXX-XXXXX-XXXXX
   if (req.method === "GET" && req.url.startsWith("/check")) {
     const url = new URL(req.url, `http://localhost:${CONFIG.API_PORT}`)
     const key = url.searchParams.get("key")
@@ -723,7 +754,6 @@ const apiServer = http.createServer((req, res) => {
     return
   }
 
-  // API: Активация лицензии POST /activate
   if (req.method === "POST" && req.url === "/activate") {
     let body = ""
     req.on("data", (chunk) => {
@@ -743,7 +773,6 @@ const apiServer = http.createServer((req, res) => {
     return
   }
 
-  // 404
   res.writeHead(404, { "Content-Type": "application/json" })
   res.end(JSON.stringify({ error: "Не найдено" }))
 })
