@@ -18,8 +18,8 @@ const http = require("http")
 const CONFIG = {
   BOT_TOKEN: process.env.BOT_TOKEN || "8530886952:AAELDw3vMrljicbyl2Nyzwh1zDQMsCi8Jk0",
   ADMIN_ID: process.env.ADMIN_ID || "1830230896",
-  PRICE_PREMIUM: 150, // Цена Premium подписки
-  PRICE_PROXY: 250, // Цена индивидуального прокси
+  PRICE_PREMIUM: 250, // Цена Premium подписки
+  PRICE_PROXY: 150, // Цена индивидуального прокси
   LICENSE_FILE: "./licenses.json",
   API_PORT: process.env.API_PORT || 3847,
   API_HOST: process.env.API_HOST || "0.0.0.0",
@@ -30,10 +30,12 @@ const bot = new TelegramBot(CONFIG.BOT_TOKEN, { polling: true })
 
 // Хранилище лицензий
 let licenses = {}
-
-const pendingOrders = {}
-
+const revokedKeys = new Set()
+const waitingPayment = {}
 const supportTickets = {}
+let expirationNotified = new Set()
+
+const pendingOrders = {} // Declaration of pendingOrders variable
 
 bot.setMyCommands([
   { command: "start", description: "Главное меню" },
@@ -49,6 +51,9 @@ function loadLicenses() {
   try {
     if (fs.existsSync(CONFIG.LICENSE_FILE)) {
       licenses = JSON.parse(fs.readFileSync(CONFIG.LICENSE_FILE, "utf8"))
+    }
+    if (fs.existsSync("./expiration_notified.json")) {
+      expirationNotified = new Set(JSON.parse(fs.readFileSync("./expiration_notified.json", "utf8")))
     }
   } catch (error) {
     console.error("Ошибка загрузки лицензий:", error)
@@ -192,14 +197,14 @@ bot.onText(/\/buy/, (msg) => {
 Способы оплаты:
 
 1. Перевод на карту:
-2204320688487737 (Т-Банк)
+2204320688487737 (**OzonBank**)
 
 2. ЮMoney:
 4100119424240925
 
 После оплаты отправьте скриншот чека или нажмите "Я оплатил"
 
-Важно: В комментарии к переводу укажите ваш Telegram: @${msg.from.username || "ваш_username"}
+**Важно: В комментарии к переводу укажите ваш Telegram:** @${msg.from.username || "ваш_username"}
   `
 
   const keyboard = {
@@ -233,14 +238,14 @@ bot.onText(/\/proxy/, (msg) => {
 Способы оплаты:
 
 1. Перевод на карту:
-2204320688487737 (Т-Банк)
+2204320688487737 (**OzonBank**)
 
 2. ЮMoney:
 4100119424240925
 
 После оплаты отправьте скриншот чека или нажмите "Я оплатил"
 
-Важно: В комментарии укажите ваш Telegram: @${msg.from.username || "ваш_username"}
+**Важно: В комментарии укажите ваш Telegram:** @${msg.from.username || "ваш_username"}
   `
 
   const keyboard = {
@@ -261,6 +266,8 @@ bot.onText(/\/paid/, (msg) => {
 })
 
 bot.on("callback_query", (query) => {
+  console.log("[v0] callback_query received:", query.data)
+
   if (query.data === "cancel_support") {
     delete supportTickets[query.from.id]
     bot.sendMessage(query.message.chat.id, "Обращение отменено. Если понадобится помощь - напишите /support")
@@ -269,26 +276,72 @@ bot.on("callback_query", (query) => {
   }
 
   if (query.data === "paid" || query.data === "paid_premium") {
-    pendingOrders[query.from.id] = { type: "premium", chatId: query.message.chat.id }
-    handlePaymentConfirmation(query.message.chat.id, query.from, "premium")
-    bot.answerCallbackQuery(query.id)
-  } else if (query.data === "paid_proxy") {
-    pendingOrders[query.from.id] = { type: "proxy", chatId: query.message.chat.id }
-    handlePaymentConfirmation(query.message.chat.id, query.from, "proxy")
-    bot.answerCallbackQuery(query.id)
-  } else if (query.data.startsWith("approve_")) {
+    console.log("[v0] paid_premium button clicked by user:", query.from.id)
+    waitingPayment[query.from.id] = {
+      type: "premium",
+      chatId: query.message.chat.id,
+      username: query.from.username,
+      firstName: query.from.first_name,
+      timestamp: Date.now(),
+    }
+    bot.answerCallbackQuery(query.id, { text: "Отправьте скриншот чека" })
+    bot.sendMessage(
+      query.message.chat.id,
+      `Подтверждение оплаты Premium подписки
+
+Пожалуйста, отправьте скриншот или фото чека об оплате.
+
+После проверки администратором вы получите лицензионный ключ.
+
+Обычно проверка занимает до 30 минут.`,
+    )
+    return
+  }
+
+  if (query.data === "paid_proxy") {
+    console.log("[v0] paid_proxy button clicked by user:", query.from.id)
+    waitingPayment[query.from.id] = {
+      type: "proxy",
+      chatId: query.message.chat.id,
+      username: query.from.username,
+      firstName: query.from.first_name,
+      timestamp: Date.now(),
+    }
+    bot.answerCallbackQuery(query.id, { text: "Отправьте скриншот чека" })
+    bot.sendMessage(
+      query.message.chat.id,
+      `Подтверждение оплаты индивидуального прокси
+
+Пожалуйста, отправьте скриншот или фото чека об оплате.
+
+После проверки администратором вы получите данные прокси.
+
+Обычно проверка занимает до 30 минут.`,
+    )
+    return
+  }
+
+  if (query.data.startsWith("approve_")) {
     const parts = query.data.split("_")
     const type = parts[1]
     const userId = parts[2]
     const chatId = parts[3]
     handleApproval(query, userId, chatId, true, type)
-  } else if (query.data.startsWith("reject_")) {
+    bot.answerCallbackQuery(query.id)
+    return
+  }
+
+  if (query.data.startsWith("reject_")) {
     const parts = query.data.split("_")
     const type = parts[1]
     const userId = parts[2]
     const chatId = parts[3]
     handleApproval(query, userId, chatId, false, type)
-  } else if (query.data.startsWith("reply_support_")) {
+    bot.answerCallbackQuery(query.id)
+    return
+  }
+
+  if (query.data.startsWith("reply_support_")) {
     const parts = query.data.split("_")
     const targetUserId = parts[2]
     const targetChatId = parts[3]
@@ -300,7 +353,10 @@ bot.on("callback_query", (query) => {
 
     bot.sendMessage(query.message.chat.id, `Введите ответ пользователю ${targetUserId}:`)
     bot.answerCallbackQuery(query.id)
-  } else if (query.data.startsWith("close_ticket_")) {
+    return
+  }
+
+  if (query.data.startsWith("close_ticket_")) {
     const parts = query.data.split("_")
     const targetUserId = parts[2]
     const targetChatId = parts[3]
@@ -313,16 +369,25 @@ bot.on("callback_query", (query) => {
       message_id: query.message.message_id,
     })
     bot.answerCallbackQuery(query.id)
+    return
   }
 })
 
 function handlePaymentConfirmation(chatId, user, type = "premium") {
   const productName = type === "proxy" ? "индивидуального прокси" : "Premium подписки"
 
+  waitingPayment[user.id] = {
+    type,
+    chatId,
+    username: user.username,
+    firstName: user.first_name,
+    timestamp: Date.now(),
+  }
+
   const confirmMessage = `
 Подтверждение оплаты ${productName}
 
-Пожалуйста, отправьте скриншот чека об оплате.
+Пожалуйста, отправьте скриншот или фото чека об оплате.
 
 После проверки администратором вы получите ${type === "proxy" ? "данные прокси" : "лицензионный ключ"}.
 
@@ -330,32 +395,6 @@ function handlePaymentConfirmation(chatId, user, type = "premium") {
   `
 
   bot.sendMessage(chatId, confirmMessage)
-
-  const price = type === "proxy" ? CONFIG.PRICE_PROXY : CONFIG.PRICE_PREMIUM
-
-  // Уведомление админа
-  const adminMessage = `
-Новая заявка на оплату!
-
-Тип: ${type === "proxy" ? "Индивидуальный прокси" : "Premium подписка"}
-Сумма: ${price} руб.
-Пользователь: @${user.username || "неизвестен"} (${user.first_name})
-ID: ${user.id}
-Дата: ${new Date().toLocaleString("ru-RU")}
-  `
-
-  const adminKeyboard = {
-    inline_keyboard: [
-      [
-        { text: "Подтвердить", callback_data: `approve_${type}_${user.id}_${chatId}` },
-        { text: "Отклонить", callback_data: `reject_${type}_${user.id}_${chatId}` },
-      ],
-    ],
-  }
-
-  bot.sendMessage(CONFIG.ADMIN_ID, adminMessage, {
-    reply_markup: adminKeyboard,
-  })
 }
 
 function handleApproval(query, userId, chatId, approved, type = "premium") {
@@ -370,7 +409,7 @@ function handleApproval(query, userId, chatId, approved, type = "premium") {
     if (type === "proxy") {
       bot.sendMessage(
         CONFIG.ADMIN_ID,
-        `Введите данные прокси для пользователя ${userId} в формате:\n/sendproxy ${userId} ${chatId} IP:PORT:LOGIN:PASSWORD`,
+        `Введите данные прокси для пользователя ${userId} в формате:\n/sendproxy ${userId} IP:PORT:LOGIN:PASSWORD\n\nПример:\n/sendproxy ${userId} 88.218.50.217:8000:login:password`,
       )
 
       const waitText = `Заявка одобрена!\nОжидается отправка данных прокси пользователю ${userId}`
@@ -385,10 +424,14 @@ function handleApproval(query, userId, chatId, approved, type = "premium") {
             bot.sendMessage(query.message.chat.id, waitText)
           })
       } else {
-        bot.editMessageText(waitText, {
-          chat_id: query.message.chat.id,
-          message_id: query.message.message_id,
-        })
+        bot
+          .editMessageText(waitText, {
+            chat_id: query.message.chat.id,
+            message_id: query.message.message_id,
+          })
+          .catch(() => {
+            bot.sendMessage(query.message.chat.id, waitText)
+          })
       }
     } else {
       const license = createLicense(userId, query.from.username)
@@ -426,14 +469,18 @@ ${license.key}
             bot.sendMessage(query.message.chat.id, successText)
           })
       } else {
-        bot.editMessageText(successText, {
-          chat_id: query.message.chat.id,
-          message_id: query.message.message_id,
-        })
+        bot
+          .editMessageText(successText, {
+            chat_id: query.message.chat.id,
+            message_id: query.message.message_id,
+          })
+          .catch(() => {
+            bot.sendMessage(query.message.chat.id, successText)
+          })
       }
     }
   } else {
-    bot.sendMessage(chatId, "К сожалению, ваш платеж не подтвержден. Пожалуйста, свяжитесь с поддержкой @noname22444")
+    bot.sendMessage(chatId, "К сожалению, ваш платеж не подтвержден. Свяжитесь с поддержкой /support")
 
     const rejectText = "Заявка отклонена"
 
@@ -447,26 +494,156 @@ ${license.key}
           bot.sendMessage(query.message.chat.id, rejectText)
         })
     } else {
-      bot.editMessageText(rejectText, {
-        chat_id: query.message.chat.id,
-        message_id: query.message.message_id,
-      })
+      bot
+        .editMessageText(rejectText, {
+          chat_id: query.message.chat.id,
+          message_id: query.message.message_id,
+        })
+        .catch(() => {
+          bot.sendMessage(query.message.chat.id, rejectText)
+        })
     }
   }
 
   bot.answerCallbackQuery(query.id)
 }
 
-bot.onText(/\/sendproxy (\d+) (\d+) (.+)/, (msg, match) => {
-  if (msg.from.id.toString() !== CONFIG.ADMIN_ID.toString()) return
+bot.on("photo", (msg) => {
+  const userId = msg.from.id
+  const chatId = msg.chat.id
+
+  // Проверяем ожидает ли пользователь подтверждение оплаты
+  const pending = waitingPayment[userId]
+
+  if (pending) {
+    const type = pending.type
+    const price = type === "proxy" ? CONFIG.PRICE_PROXY : CONFIG.PRICE_PREMIUM
+    const productName = type === "proxy" ? "Индивидуальный прокси" : "Premium подписка"
+    const premiumStatus = checkUserPremium(userId)
+
+    let caption = `Новый чек об оплате!\n\n`
+    caption += `Тип: ${productName}\n`
+    caption += `Сумма: ${price} руб.\n`
+    caption += `Пользователь: @${pending.username || "неизвестен"} (${pending.firstName})\n`
+    caption += `ID: ${userId}\n`
+    caption += `Дата: ${new Date().toLocaleString("ru-RU")}`
+
+    if (premiumStatus.hasPremium) {
+      caption += `\n\nПРИОРИТЕТ: Premium пользователь`
+    }
+
+    const adminKeyboard = {
+      inline_keyboard: [
+        [
+          { text: "Подтвердить", callback_data: `approve_${type}_${userId}_${chatId}` },
+          { text: "Отклонить", callback_data: `reject_${type}_${userId}_${chatId}` },
+        ],
+      ],
+    }
+
+    // Пересылаем фото админу с кнопками
+    const photoId = msg.photo[msg.photo.length - 1].file_id
+    bot.sendPhoto(CONFIG.ADMIN_ID, photoId, {
+      caption: caption,
+      reply_markup: adminKeyboard,
+    })
+
+    bot.sendMessage(chatId, "Чек получен! Ожидайте подтверждения от администратора.")
+
+    // Удаляем из ожидающих
+    delete waitingPayment[userId]
+  } else {
+    // Если нет ожидающей оплаты - может это для поддержки
+    if (supportTickets[userId]) {
+      const ticket = supportTickets[userId]
+      const premiumStatus = checkUserPremium(userId)
+
+      let caption = `Фото от пользователя в поддержку\n\n`
+      if (premiumStatus.hasPremium) {
+        caption += `ПРИОРИТЕТ: Premium пользователь\n\n`
+      }
+      caption += `От: @${ticket.username} (ID: ${userId})\n`
+      caption += `Дата: ${new Date().toLocaleString("ru-RU")}`
+
+      const adminKeyboard = {
+        inline_keyboard: [
+          [
+            { text: "Ответить", callback_data: `reply_support_${userId}_${chatId}` },
+            { text: "Закрыть тикет", callback_data: `close_ticket_${userId}_${chatId}` },
+          ],
+        ],
+      }
+
+      const photoId = msg.photo[msg.photo.length - 1].file_id
+      bot.sendPhoto(CONFIG.ADMIN_ID, photoId, {
+        caption: caption,
+        reply_markup: adminKeyboard,
+      })
+
+      bot.sendMessage(chatId, "Фото отправлено в поддержку!")
+      delete supportTickets[userId]
+    } else {
+      bot.sendMessage(chatId, "Если вы хотите оплатить Premium или прокси, сначала используйте команду /buy или /proxy")
+    }
+  }
+})
+
+bot.on("document", (msg) => {
+  const userId = msg.from.id
+  const chatId = msg.chat.id
+
+  const pending = waitingPayment[userId]
+
+  if (pending) {
+    const type = pending.type
+    const price = type === "proxy" ? CONFIG.PRICE_PROXY : CONFIG.PRICE_PREMIUM
+    const productName = type === "proxy" ? "Индивидуальный прокси" : "Premium подписка"
+    const premiumStatus = checkUserPremium(userId)
+
+    let caption = `Новый чек об оплате (документ)!\n\n`
+    caption += `Тип: ${productName}\n`
+    caption += `Сумма: ${price} руб.\n`
+    caption += `Пользователь: @${pending.username || "неизвестен"} (${pending.firstName})\n`
+    caption += `ID: ${userId}\n`
+    caption += `Дата: ${new Date().toLocaleString("ru-RU")}`
+
+    if (premiumStatus.hasPremium) {
+      caption += `\n\nПРИОРИТЕТ: Premium пользователь`
+    }
+
+    const adminKeyboard = {
+      inline_keyboard: [
+        [
+          { text: "Подтвердить", callback_data: `approve_${type}_${userId}_${chatId}` },
+          { text: "Отклонить", callback_data: `reject_${type}_${userId}_${chatId}` },
+        ],
+      ],
+    }
+
+    bot.sendDocument(CONFIG.ADMIN_ID, msg.document.file_id, {
+      caption: caption,
+      reply_markup: adminKeyboard,
+    })
+
+    bot.sendMessage(chatId, "Документ получен! Ожидайте подтверждения от администратора.")
+    delete waitingPayment[userId]
+  } else {
+    bot.sendMessage(chatId, "Если вы хотите оплатить Premium или прокси, сначала используйте команду /buy или /proxy")
+  }
+})
+
+bot.onText(/\/sendproxy (\d+) (.+)/, (msg, match) => {
+  if (msg.from.id.toString() !== CONFIG.ADMIN_ID.toString()) {
+    bot.sendMessage(msg.chat.id, "У вас нет прав для этой команды")
+    return
+  }
 
   const userId = match[1]
-  const chatId = match[2]
-  const proxyData = match[3] // IP:PORT:LOGIN:PASSWORD
+  const proxyData = match[2] // IP:PORT:LOGIN:PASSWORD
 
   const parts = proxyData.split(":")
   if (parts.length < 2) {
-    bot.sendMessage(msg.chat.id, "Неверный формат. Используйте: /sendproxy USER_ID CHAT_ID IP:PORT:LOGIN:PASSWORD")
+    bot.sendMessage(msg.chat.id, "Неверный формат. Используйте: /sendproxy USER_ID IP:PORT:LOGIN:PASSWORD")
     return
   }
 
@@ -479,18 +656,20 @@ IP: ${parts[0]}
 ${parts[2] ? `Логин: ${parts[2]}` : ""}
 ${parts[3] ? `Пароль: ${parts[3]}` : ""}
 
-Как подключить:
-1. Откройте ProxySwitcher
-2. Нажмите "Добавить"
-3. Введите данные прокси
-4. Нажмите "Подключить"
+Добавьте эти данные в приложение ProxySwitcher.
+Прокси закреплен только за вами.
 
 Спасибо за покупку!
-По вопросам: @noname22444
   `
 
-  bot.sendMessage(chatId, proxyMessage)
-  bot.sendMessage(msg.chat.id, `Прокси отправлен пользователю ${userId}`)
+  bot
+    .sendMessage(userId, proxyMessage)
+    .then(() => {
+      bot.sendMessage(msg.chat.id, `Данные прокси успешно отправлены пользователю ${userId}`)
+    })
+    .catch((err) => {
+      bot.sendMessage(msg.chat.id, `Ошибка отправки: ${err.message}`)
+    })
 })
 
 bot.onText(/\/check (.+)/, (msg, match) => {
@@ -609,10 +788,115 @@ ${msg.text}`
   }
 })
 
+bot.onText(/\/revoke (.+)/, (msg, match) => {
+  // Проверка что команду отправил админ
+  if (msg.from.id.toString() !== CONFIG.ADMIN_ID.toString()) {
+    bot.sendMessage(msg.chat.id, "У вас нет прав для выполнения этой команды.")
+    return
+  }
+
+  const key = match[1].trim().toUpperCase()
+
+  if (!licenses[key]) {
+    bot.sendMessage(msg.chat.id, `Лицензия ${key} не найдена.`)
+    return
+  }
+
+  const license = licenses[key]
+  const userId = license.userId
+  const username = license.username
+
+  // Деактивируем лицензию
+  license.status = "revoked"
+  license.revokedAt = new Date().toISOString()
+  license.revokedBy = msg.from.id
+  saveLicenses()
+
+  bot.sendMessage(
+    msg.chat.id,
+    `Лицензия успешно отозвана!\n\nКлюч: ${key}\nПользователь: @${username || "неизвестен"} (ID: ${userId})\nСтатус: Отозвана`,
+  )
+
+  // Уведомляем пользователя
+  if (userId) {
+    bot
+      .sendMessage(
+        userId,
+        `Ваша Premium подписка была отозвана.\n\nКлюч: ${key}\n\nЕсли вы считаете что это ошибка, свяжитесь с поддержкой /support`,
+      )
+      .catch(() => {
+        // Пользователь мог заблокировать бота
+      })
+  }
+})
+
+bot.onText(/\/licenses/, (msg) => {
+  if (msg.from.id.toString() !== CONFIG.ADMIN_ID.toString()) {
+    bot.sendMessage(msg.chat.id, "У вас нет прав для выполнения этой команды.")
+    return
+  }
+
+  const activeLicenses = Object.values(licenses).filter((l) => l.status === "active")
+
+  if (activeLicenses.length === 0) {
+    bot.sendMessage(msg.chat.id, "Нет активных лицензий.")
+    return
+  }
+
+  let message = `Активные лицензии (${activeLicenses.length}):\n\n`
+
+  activeLicenses.forEach((license, index) => {
+    const expiresDate = new Date(license.expiresAt).toLocaleDateString("ru-RU")
+    const daysLeft = Math.ceil((new Date(license.expiresAt) - new Date()) / (1000 * 60 * 60 * 24))
+    message += `${index + 1}. ${license.key}\n`
+    message += `   Пользователь: @${license.username || "неизвестен"} (ID: ${license.userId})\n`
+    message += `   Истекает: ${expiresDate} (${daysLeft} дн.)\n\n`
+  })
+
+  message += `\nДля отзыва лицензии: /revoke КЛЮЧ`
+
+  // Разбиваем на части если сообщение слишком длинное
+  if (message.length > 4000) {
+    const chunks = message.match(/.{1,4000}/gs)
+    chunks.forEach((chunk) => bot.sendMessage(msg.chat.id, chunk))
+  } else {
+    bot.sendMessage(msg.chat.id, message)
+  }
+})
+
+bot.onText(/\/finduser (\d+)/, (msg, match) => {
+  if (msg.from.id.toString() !== CONFIG.ADMIN_ID.toString()) {
+    bot.sendMessage(msg.chat.id, "У вас нет прав для выполнения этой команды.")
+    return
+  }
+
+  const userId = match[1]
+  const userLicenses = Object.values(licenses).filter((l) => l.userId.toString() === userId)
+
+  if (userLicenses.length === 0) {
+    bot.sendMessage(msg.chat.id, `Лицензии для пользователя ${userId} не найдены.`)
+    return
+  }
+
+  let message = `Лицензии пользователя ${userId}:\n\n`
+
+  userLicenses.forEach((license, index) => {
+    const expiresDate = license.expiresAt ? new Date(license.expiresAt).toLocaleDateString("ru-RU") : "Бессрочно"
+    message += `${index + 1}. ${license.key}\n`
+    message += `   Статус: ${license.status === "active" ? "Активна" : license.status === "revoked" ? "Отозвана" : "Истекла"}\n`
+    message += `   Истекает: ${expiresDate}\n\n`
+  })
+
+  message += `\nДля отзыва: /revoke КЛЮЧ`
+
+  bot.sendMessage(msg.chat.id, message)
+})
+
 bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id
+  const isAdmin = msg.from.id.toString() === CONFIG.ADMIN_ID.toString()
 
-  const helpMessage = `
+  let helpMessage = `
 Помощь по ProxySwitcher Bot
 
 Товары:
@@ -633,104 +917,27 @@ bot.onText(/\/help/, (msg) => {
 Telegram канал: @proxyswither
   `
 
+  if (isAdmin) {
+    helpMessage += `
+
+--- Админ команды ---
+/licenses - Список всех активных лицензий
+/finduser <ID> - Найти лицензии пользователя
+/revoke <ключ> - Отозвать лицензию
+/sendproxy <userID> <данные> - Отправить прокси
+/admin_generate - Сгенерировать тестовый ключ
+`
+  }
+
   bot.sendMessage(chatId, helpMessage)
-})
-
-bot.on("photo", (msg) => {
-  const chatId = msg.chat.id
-  const user = msg.from
-  const photo = msg.photo[msg.photo.length - 1]
-
-  const order = pendingOrders[user.id] || { type: "premium" }
-  const price = order.type === "proxy" ? CONFIG.PRICE_PROXY : CONFIG.PRICE_PREMIUM
-
-  bot.sendMessage(chatId, `Скриншот получен! Ожидайте проверки администратором. Обычно это занимает до 30 минут.`)
-
-  const adminCaption = `
-Новый скриншот чека!
-
-Тип: ${order.type === "proxy" ? "Индивидуальный прокси" : "Premium подписка"}
-Сумма: ${price} руб.
-Пользователь: @${user.username || "неизвестен"} (${user.first_name})
-ID: ${user.id}
-Дата: ${new Date().toLocaleString("ru-RU")}
-  `
-
-  const adminKeyboard = {
-    inline_keyboard: [
-      [
-        { text: "Подтвердить оплату", callback_data: `approve_${order.type}_${user.id}_${chatId}` },
-        { text: "Отклонить", callback_data: `reject_${order.type}_${user.id}_${chatId}` },
-      ],
-    ],
-  }
-
-  bot.sendPhoto(CONFIG.ADMIN_ID, photo.file_id, {
-    caption: adminCaption,
-    reply_markup: adminKeyboard,
-  })
-})
-
-bot.on("document", (msg) => {
-  const chatId = msg.chat.id
-  const user = msg.from
-  const doc = msg.document
-
-  if (doc.mime_type && doc.mime_type.startsWith("image/")) {
-    const order = pendingOrders[user.id] || { type: "premium" }
-    const price = order.type === "proxy" ? CONFIG.PRICE_PROXY : CONFIG.PRICE_PREMIUM
-
-    bot.sendMessage(chatId, "Файл получен! Ожидайте проверки администратором.")
-
-    const adminCaption = `
-Новый файл чека!
-
-Тип: ${order.type === "proxy" ? "Индивидуальный прокси" : "Premium подписка"}
-Сумма: ${price} руб.
-Пользователь: @${user.username || "неизвестен"} (${user.first_name})
-ID: ${user.id}
-Файл: ${doc.file_name}
-Дата: ${new Date().toLocaleString("ru-RU")}
-    `
-
-    const adminKeyboard = {
-      inline_keyboard: [
-        [
-          { text: "Подтвердить оплату", callback_data: `approve_${order.type}_${user.id}_${chatId}` },
-          { text: "Отклонить", callback_data: `reject_${order.type}_${user.id}_${chatId}` },
-        ],
-      ],
-    }
-
-    bot.sendDocument(CONFIG.ADMIN_ID, doc.file_id, {
-      caption: adminCaption,
-      reply_markup: adminKeyboard,
-    })
-  }
-})
-
-bot.onText(/\/admin_generate/, (msg) => {
-  if (msg.from.id.toString() !== CONFIG.ADMIN_ID.toString()) return
-
-  const license = createLicense(msg.from.id, msg.from.username)
-  bot.sendMessage(msg.chat.id, `Новый ключ сгенерирован:\n${license.key}`)
-})
-
-bot.onText(/\/admin_stats/, (msg) => {
-  if (msg.from.id.toString() !== CONFIG.ADMIN_ID.toString()) return
-
-  const totalLicenses = Object.keys(licenses).length
-  const activeLicenses = Object.values(licenses).filter((l) => l.status === "active").length
-
-  bot.sendMessage(msg.chat.id, `Статистика:\nВсего лицензий: ${totalLicenses}\nАктивных: ${activeLicenses}`)
 })
 
 loadLicenses()
 
-const apiServer = http.createServer((req, res) => {
+const server = http.createServer((req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*")
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type")
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS")
+  res.setHeader("Content-Type", "application/json; charset=utf-8")
 
   if (req.method === "OPTIONS") {
     res.writeHead(200)
@@ -738,48 +945,112 @@ const apiServer = http.createServer((req, res) => {
     return
   }
 
-  if (req.method === "GET" && req.url.startsWith("/check")) {
-    const url = new URL(req.url, `http://localhost:${CONFIG.API_PORT}`)
+  const url = new URL(req.url, `http://${req.headers.host}`)
+
+  if (url.pathname === "/check" && req.method === "GET") {
     const key = url.searchParams.get("key")
 
     if (!key) {
-      res.writeHead(400, { "Content-Type": "application/json" })
-      res.end(JSON.stringify({ valid: false, error: "Ключ не указан" }))
+      res.writeHead(400)
+      res.end(JSON.stringify({ error: "Key required" }))
       return
     }
 
     const result = checkLicense(key.toUpperCase())
-    res.writeHead(200, { "Content-Type": "application/json" })
+    res.writeHead(200)
     res.end(JSON.stringify(result))
     return
   }
 
-  if (req.method === "POST" && req.url === "/activate") {
-    let body = ""
-    req.on("data", (chunk) => {
-      body += chunk
-    })
-    req.on("end", () => {
-      try {
-        const { key } = JSON.parse(body)
-        const result = checkLicense(key.toUpperCase())
-        res.writeHead(200, { "Content-Type": "application/json" })
-        res.end(JSON.stringify(result))
-      } catch (e) {
-        res.writeHead(400, { "Content-Type": "application/json" })
-        res.end(JSON.stringify({ valid: false, error: "Неверный запрос" }))
-      }
-    })
+  if (url.pathname === "/status" && req.method === "GET") {
+    const key = url.searchParams.get("key")
+
+    if (!key) {
+      res.writeHead(400)
+      res.end(JSON.stringify({ error: "Key required" }))
+      return
+    }
+
+    const license = licenses[key.toUpperCase()]
+
+    if (!license) {
+      res.writeHead(200)
+      res.end(JSON.stringify({ exists: false }))
+      return
+    }
+
+    res.writeHead(200)
+    res.end(
+      JSON.stringify({
+        exists: true,
+        status: license.status,
+        expiresAt: license.expiresAt,
+        revoked: license.status === "revoked",
+        revokedAt: license.revokedAt || null,
+      }),
+    )
     return
   }
 
-  res.writeHead(404, { "Content-Type": "application/json" })
-  res.end(JSON.stringify({ error: "Не найдено" }))
+  res.writeHead(404)
+  res.end(JSON.stringify({ error: "Not found" }))
 })
 
-apiServer.listen(CONFIG.API_PORT, CONFIG.API_HOST, () => {
+server.listen(CONFIG.API_PORT, CONFIG.API_HOST, () => {
   console.log(`API лицензий запущен на http://${CONFIG.API_HOST}:${CONFIG.API_PORT}`)
 })
 
 console.log("ProxySwitcher Bot запущен!")
 console.log("Команды бота установлены в меню Telegram")
+
+function checkExpiringLicenses() {
+  const now = new Date()
+  const oneDayMs = 24 * 60 * 60 * 1000
+
+  for (const key in licenses) {
+    const license = licenses[key]
+
+    if (license.status !== "active" || !license.expiresAt) continue
+
+    const expiresDate = new Date(license.expiresAt)
+    const timeLeft = expiresDate.getTime() - now.getTime()
+
+    // Если осталось меньше 1 дня и уведомление еще не отправлено
+    if (timeLeft > 0 && timeLeft <= oneDayMs && !expirationNotified.has(key)) {
+      const hoursLeft = Math.floor(timeLeft / (60 * 60 * 1000))
+
+      // Уведомление админу
+      bot.sendMessage(
+        CONFIG.ADMIN_ID,
+        `⚠️ *Истекает подписка!*\n\n` +
+          `Пользователь: ${license.username ? "@" + license.username : "ID: " + license.userId}\n` +
+          `ID: \`${license.userId}\`\n` +
+          `Ключ: \`${key}\`\n` +
+          `Истекает через: ${hoursLeft} ч.\n` +
+          `Дата: ${expiresDate.toLocaleDateString("ru-RU")}`,
+        { parse_mode: "Markdown" },
+      )
+
+      // Уведомление пользователю
+      bot
+        .sendMessage(
+          license.userId,
+          `⚠️ *Ваша Premium подписка истекает!*\n\n` +
+            `Осталось менее 24 часов.\n` +
+            `Дата окончания: ${expiresDate.toLocaleDateString("ru-RU")}\n\n` +
+            `Для продления используйте /buy`,
+          { parse_mode: "Markdown" },
+        )
+        .catch(() => {})
+
+      // Отмечаем что уведомление отправлено
+      expirationNotified.add(key)
+      fs.writeFileSync("./expiration_notified.json", JSON.stringify([...expirationNotified]))
+    }
+  }
+}
+
+setInterval(checkExpiringLicenses, 60 * 60 * 1000)
+
+// Проверка при запуске
+setTimeout(checkExpiringLicenses, 5000)
