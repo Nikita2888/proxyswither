@@ -24,6 +24,10 @@ const CONFIG = {
   LICENSE_FILE: "./licenses.json",
   API_PORT: process.env.API_PORT || 80, // изменил порт с 3847 на 80
   API_HOST: process.env.API_HOST || "0.0.0.0",
+  SUPABASE_URL: process.env.SUPABASE_URL || "https://fbasfoutfoqqriinghht.supabase.co",
+  SUPABASE_SERVICE_KEY:
+    process.env.SUPABASE_SERVICE_KEY ||
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZiYXNmb3V0Zm9xcXJpaW5naGh0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ4OTA1MDksImV4cCI6MjA4MDQ2NjUwOX0._EUg9Poiy616Tc-6JEkrKdXH7KO1xbA3iNymK5TKfFE",
 }
 
 // Инициализация бота
@@ -66,7 +70,6 @@ function loadLicenses() {
 function saveLicenses() {
   try {
     fs.writeFileSync(CONFIG.LICENSE_FILE, JSON.stringify(licenses, null, 2))
-    syncLicensesToGitHub()
   } catch (error) {
     console.error("Ошибка сохранения лицензий:", error)
   }
@@ -101,68 +104,67 @@ function httpsRequest(options, postData = null) {
   })
 }
 
-async function syncLicensesToGitHub() {
-  const GITHUB_TOKEN = process.env.GITHUB_TOKEN
-  if (!GITHUB_TOKEN) {
-    console.log("GITHUB_TOKEN не настроен, синхронизация пропущена")
-    return
-  }
-
-  const GITHUB_USER = "Nikita2888"
-  const GITHUB_REPO = "v0app"
-  const FILE_PATH = "licenses.json"
-
+async function syncLicenseToSupabase(license, action = "upsert") {
   try {
-    // Получаем текущий файл для получения SHA
-    const getOptions = {
-      hostname: "api.github.com",
-      path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/contents/${FILE_PATH}`,
-      method: "GET",
-      headers: {
-        Authorization: `token ${GITHUB_TOKEN}`,
-        Accept: "application/vnd.github.v3+json",
-        "User-Agent": "ProxySwitcher-Bot",
-      },
-    }
-
-    const getResponse = await httpsRequest(getOptions)
-
-    let sha = null
-    if (getResponse.ok) {
-      const fileData = getResponse.json()
-      sha = fileData.sha
-    }
-
-    // Обновляем файл
-    const content = Buffer.from(JSON.stringify(licenses, null, 2)).toString("base64")
     const body = JSON.stringify({
-      message: "Update licenses",
-      content: content,
-      sha: sha,
+      key: license.key,
+      user_id: license.userId.toString(),
+      username: license.username || null,
+      created_at: license.createdAt,
+      expires_at: license.expiresAt,
+      status: license.status,
     })
 
-    const updateOptions = {
-      hostname: "api.github.com",
-      path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/contents/${FILE_PATH}`,
-      method: "PUT",
+    const options = {
+      hostname: "fbasfoutfoqqriinghht.supabase.co",
+      path: "/rest/v1/licenses",
+      method: "POST",
       headers: {
-        Authorization: `token ${GITHUB_TOKEN}`,
-        Accept: "application/vnd.github.v3+json",
+        apikey: CONFIG.SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${CONFIG.SUPABASE_SERVICE_KEY}`,
         "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates",
         "Content-Length": Buffer.byteLength(body),
-        "User-Agent": "ProxySwitcher-Bot",
       },
     }
 
-    const updateResponse = await httpsRequest(updateOptions, body)
+    const response = await httpsRequest(options, body)
 
-    if (updateResponse.ok) {
-      console.log("Лицензии синхронизированы с GitHub")
+    if (response.ok || response.status === 201) {
+      console.log(`Лицензия ${license.key} синхронизирована с Supabase`)
     } else {
-      console.error("Ошибка синхронизации с GitHub:", updateResponse.text())
+      console.error("Ошибка синхронизации с Supabase:", response.status, await response.text())
     }
   } catch (error) {
-    console.error("Ошибка синхронизации с GitHub:", error.message)
+    console.error("Ошибка синхронизации с Supabase:", error.message)
+  }
+}
+
+async function updateLicenseStatusInSupabase(key, status) {
+  try {
+    const body = JSON.stringify({ status })
+
+    const options = {
+      hostname: "fbasfoutfoqqriinghht.supabase.co",
+      path: `/rest/v1/licenses?key=eq.${encodeURIComponent(key)}`,
+      method: "PATCH",
+      headers: {
+        apikey: CONFIG.SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${CONFIG.SUPABASE_SERVICE_KEY}`,
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+      },
+    }
+
+    const response = await httpsRequest(options, body)
+
+    if (response.ok) {
+      console.log(`Статус лицензии ${key} обновлен на ${status} в Supabase`)
+    } else {
+      console.error("Ошибка обновления статуса в Supabase:", response.status)
+    }
+  } catch (error) {
+    console.error("Ошибка обновления статуса в Supabase:", error.message)
   }
 }
 
@@ -197,6 +199,7 @@ function createLicense(userId, username) {
 
   licenses[key] = license
   saveLicenses()
+  syncLicenseToSupabase(license)
 
   return license
 }
@@ -907,6 +910,8 @@ bot.onText(/\/revoke (.+)/, (msg, match) => {
   license.revokedAt = new Date().toISOString()
   license.revokedBy = msg.from.id
   saveLicenses()
+  // Обновляем статус лицензии в Supabase
+  updateLicenseStatusInSupabase(key, "revoked")
 
   bot.sendMessage(
     msg.chat.id,
