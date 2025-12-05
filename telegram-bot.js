@@ -115,6 +115,8 @@ async function syncLicenseToSupabase(license, action = "upsert") {
       status: license.status,
     })
 
+    console.log("[Supabase] Отправка данных:", body)
+
     const options = {
       hostname: "fbasfoutfoqqriinghht.supabase.co",
       path: "/rest/v1/licenses",
@@ -130,13 +132,18 @@ async function syncLicenseToSupabase(license, action = "upsert") {
 
     const response = await httpsRequest(options, body)
 
+    console.log("[Supabase] Ответ:", response.status, response.text())
+
     if (response.ok || response.status === 201) {
-      console.log(`Лицензия ${license.key} синхронизирована с Supabase`)
+      console.log(`[Supabase] Лицензия ${license.key} синхронизирована успешно`)
+      return true
     } else {
-      console.error("Ошибка синхронизации с Supabase:", response.status, await response.text())
+      console.error("[Supabase] Ошибка:", response.status, response.text())
+      return false
     }
   } catch (error) {
-    console.error("Ошибка синхронизации с Supabase:", error.message)
+    console.error("[Supabase] Ошибка синхронизации:", error.message)
+    return false
   }
 }
 
