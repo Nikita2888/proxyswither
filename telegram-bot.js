@@ -3,7 +3,7 @@ const { createClient } = require("@supabase/supabase-js")
 const crypto = require("crypto")
 
 // Конфигурация
-const BOT_TOKEN = "YOUR_BOT_TOKEN" // Замените на ваш токен
+const BOT_TOKEN = "8530886952:AAELDw3vMrljicbyl2Nyzwh1zDQMsCi8Jk0" // Замените на ваш токен
 const SUPABASE_URL = "https://fbasfoutfoqqriinghht.supabase.co"
 const SUPABASE_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZiYXNmb3V0Zm9xcXJpaW5naGh0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ4OTA1MDksImV4cCI6MjA4MDQ2NjUwOX0._EUg9Poiy616Tc-6JEkrKdXH7KO1xbA3iNymK5TKfFE"
