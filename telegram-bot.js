@@ -1009,7 +1009,7 @@ ${msg.text}`
   }
 })
 
-bot.onText(/\/revoke (.+)/, (msg, match) => {
+bot.onText(/\/revoke (.+)/, async (msg, match) => {
   // Проверка что команду отправил админ
   if (msg.from.id.toString() !== CONFIG.ADMIN_ID.toString()) {
     bot.sendMessage(msg.chat.id, "У вас нет прав для выполнения этой команды.")
@@ -1018,38 +1018,66 @@ bot.onText(/\/revoke (.+)/, (msg, match) => {
 
   const key = match[1].trim().toUpperCase()
 
-  if (!licenses[key]) {
-    bot.sendMessage(msg.chat.id, `Лицензия ${key} не найдена.`)
-    return
-  }
+  console.log(`[v0] Попытка отозвать лицензию: ${key}`)
 
-  const license = licenses[key]
-  const userId = license.userId
-  const username = license.username
+  try {
+    // Определяем платформу по префиксу ключа
+    const platform = key.startsWith("PC-") ? "desktop" : "mobile"
+    const tableName = platform === "desktop" ? "licenses" : "licence_mobail"
+    const keyField = platform === "desktop" ? "key" : "license_key"
+    const statusField = platform === "desktop" ? "status" : "is_active"
 
-  // Деактивируем лицензию
-  license.status = "revoked"
-  license.revokedAt = new Date().toISOString()
-  license.revokedBy = msg.from.id
-  saveLicenses()
-  // Обновляем статус лицензии в Supabase
-  updateLicenseStatusInSupabase(key, "revoked", license.platform)
+    console.log(`[v0] Платформа: ${platform}, таблица: ${tableName}`)
 
-  bot.sendMessage(
-    msg.chat.id,
-    `Лицензия успешно отозвана!\n\nКлюч: ${key}\nПользователь: @${username || "неизвестен"} (ID: ${userId})\nСтатус: Отозвана`,
-  )
+    // Ищем лицензию в Supabase
+    const searchOptions = {
+      hostname: CONFIG.SUPABASE_URL.replace("https://", "").replace("http://", ""),
+      path: `/rest/v1/${tableName}?${keyField}=eq.${key}&select=*`,
+      method: "GET",
+      headers: {
+        apikey: CONFIG.SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${CONFIG.SUPABASE_SERVICE_KEY}`,
+        "Content-Type": "application/json",
+      },
+    }
 
-  // Уведомляем пользователя
-  if (userId) {
-    bot
-      .sendMessage(
-        userId,
-        `Ваша Premium подписка была отозвана.\n\nКлюч: ${key}\n\nЕсли вы считаете что это ошибка, свяжитесь с поддержкой /support`,
-      )
-      .catch(() => {
-        // Пользователь мог заблокировать бота
-      })
+    const searchResponse = await httpsRequest(searchOptions)
+    const searchData = await searchResponse.json()
+
+    console.log(`[v0] Результат поиска лицензии:`, searchData)
+
+    if (!searchData || searchData.length === 0) {
+      bot.sendMessage(msg.chat.id, `Лицензия ${key} не найдена в базе данных.`)
+      return
+    }
+
+    const license = searchData[0]
+    const userId = license.user_id
+    const username = platform === "desktop" ? license.username : license.telegram_username
+
+    // Обновляем статус лицензии в Supabase
+    const updateValue = platform === "desktop" ? "revoked" : false
+    await updateLicenseStatusInSupabase(key, updateValue, platform)
+
+    bot.sendMessage(
+      msg.chat.id,
+      `Лицензия успешно отозвана!\n\nКлюч: ${key}\nПлатформа: ${platform === "desktop" ? "ПК" : "Mobile"}\nПользователь: @${username || "неизвестен"} (ID: ${userId})\nСтатус: Отозвана`,
+    )
+
+    // Уведомляем пользователя
+    if (userId) {
+      bot
+        .sendMessage(
+          userId,
+          `Ваша Premium подписка была отозвана.\n\nКлюч: ${key}\nПлатформа: ${platform === "desktop" ? "ПК" : "Mobile"}\n\nЕсли вы считаете что это ошибка, свяжитесь с поддержкой /support`,
+        )
+        .catch(() => {
+          console.log(`[v0] Не удалось уведомить пользователя ${userId}`)
+        })
+    }
+  } catch (error) {
+    console.error(`[v0] Ошибка при отзыве лицензии:`, error)
+    bot.sendMessage(msg.chat.id, `Ошибка при отзыве лицензии: ${error.message}`)
   }
 })
 
