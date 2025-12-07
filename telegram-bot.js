@@ -1,42 +1,59 @@
+/**
+ * Telegram Bot для продажи подписок ProxySwitcher
+ *
+ * Запуск:
+ * 1. Создайте бота через @BotFather в Telegram
+ * 2. Получите токен бота
+ * 3. Установите зависимости: npm install node-telegram-bot-api
+ * 4. Настройте переменные окружения или отредактируйте конфиг ниже
+ * 5. Запустите: node telegram-bot.js
+ */
+
 const TelegramBot = require("node-telegram-bot-api")
-const { createClient } = require("@supabase/supabase-js")
 const crypto = require("crypto")
 const fs = require("fs")
 const http = require("http")
+const https = require("https") // Заменил node-fetch на встроенный https
 
 // Конфигурация
 const CONFIG = {
   BOT_TOKEN: process.env.BOT_TOKEN || "8530886952:AAELDw3vMrljicbyl2Nyzwh1zDQMsCi8Jk0",
   ADMIN_ID: process.env.ADMIN_ID || "1830230896",
-  PRICE_PREMIUM: 250, // Premium стоит 250 рублей
-  PRICE_PROXY: 150, // Индивидуальный прокси стоит 150 рублей
+  PRICE_PREMIUM: 250, // Цена Premium подписки
+  PRICE_PROXY: 150, // Цена индивидуального прокси
   LICENSE_FILE: "./licenses.json",
-  API_PORT: process.env.API_PORT || 80,
+  API_PORT: process.env.API_PORT || 80, // изменил порт с 3847 на 80
   API_HOST: process.env.API_HOST || "0.0.0.0",
-  SUPABASE_URL: "https://fbasfoutfoqqriinghht.supabase.co",
-  SUPABASE_KEY:
+  SUPABASE_URL: process.env.SUPABASE_URL || "https://fbasfoutfoqqriinghht.supabase.co",
+  SUPABASE_SERVICE_KEY:
+    process.env.SUPABASE_SERVICE_KEY ||
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZiYXNmb3V0Zm9xcXJpaW5naGh0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ4OTA1MDksImV4cCI6MjA4MDQ2NjUwOX0._EUg9Poiy616Tc-6JEkrKdXH7KO1xbA3iNymK5TKfFE",
+  SUPABASE_KEY: process.env.SUPABASE_KEY || "YOUR_SUPABASE_KEY",
 }
 
-const supabase = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_KEY)
-
+// Инициализация бота
 const bot = new TelegramBot(CONFIG.BOT_TOKEN, { polling: true })
 
+// Хранилище лицензий
 let licenses = {}
+const revokedKeys = new Set()
 const waitingPayment = {}
 const supportTickets = {}
 let expirationNotified = new Set()
-const pendingPlatformChoice = {} // Добавил хранилище для выбора платформы
+
+const pendingOrders = {}
+const pendingPlatformChoice = {}
 
 bot.setMyCommands([
   { command: "start", description: "Главное меню" },
   { command: "buy", description: "Купить Premium подписку" },
   { command: "proxy", description: "Купить индивидуальный прокси" },
   { command: "check", description: "Проверить лицензионный ключ" },
-  { command: "support", description: "Связаться с поддержкой" },
+  { command: "support", description: "Связаться с поддержкой" }, // Добавлена команда support
   { command: "help", description: "Помощь" },
 ])
 
+// Загрузка лицензий из файла
 function loadLicenses() {
   try {
     if (fs.existsSync(CONFIG.LICENSE_FILE)) {
@@ -51,6 +68,7 @@ function loadLicenses() {
   }
 }
 
+// Сохранение лицензий в файл
 function saveLicenses() {
   try {
     fs.writeFileSync(CONFIG.LICENSE_FILE, JSON.stringify(licenses, null, 2))
@@ -59,37 +77,139 @@ function saveLicenses() {
   }
 }
 
+function httpsRequest(options, postData = null) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(options, (res) => {
+      let data = ""
+      res.on("data", (chunk) => (data += chunk))
+      res.on("end", () => {
+        try {
+          resolve({
+            ok: res.statusCode >= 200 && res.statusCode < 300,
+            status: res.statusCode,
+            json: () => JSON.parse(data),
+            text: () => data,
+          })
+        } catch (e) {
+          resolve({
+            ok: res.statusCode >= 200 && res.statusCode < 300,
+            status: res.statusCode,
+            json: () => ({}),
+            text: () => data,
+          })
+        }
+      })
+    })
+    req.on("error", reject)
+    if (postData) req.write(postData)
+    req.end()
+  })
+}
+
 async function syncLicenseToSupabase(license, platform = "pc") {
   try {
     const tableName = platform === "mobile" ? "licence_mobail" : "licenses"
 
-    const data = {
-      license_key: license.key,
-      user_id: Number.parseInt(license.userId),
-      telegram_username: license.username || null,
-      created_at: license.createdAt,
-      expires_at: license.expiresAt,
-      is_active: license.status === "active",
-      device_id: null,
+    let data
+
+    if (platform === "mobile") {
+      // Для Mobile используем: license_key, is_active, device_id, telegram_username
+      data = {
+        license_key: license.key,
+        user_id: Number.parseInt(license.userId),
+        telegram_username: license.username || null,
+        created_at: license.createdAt,
+        expires_at: license.expiresAt,
+        is_active: license.status === "active",
+        device_id: null,
+      }
+    } else {
+      // Для ПК используем: key, status, activated_device_id, username
+      data = {
+        key: license.key,
+        user_id: Number.parseInt(license.userId),
+        username: license.username || null,
+        created_at: license.createdAt,
+        expires_at: license.expiresAt,
+        status: license.status,
+      }
     }
 
-    const { error } = await supabase.from(tableName).upsert(data, {
-      onConflict: "license_key",
-    })
+    const body = JSON.stringify(data)
 
-    if (error) {
-      console.error(`[Supabase] Ошибка синхронизации в ${tableName}:`, error)
+    console.log(`[Supabase] Отправка в ${tableName}:`, body)
+
+    const options = {
+      hostname: "fbasfoutfoqqriinghht.supabase.co",
+      path: `/rest/v1/${tableName}`,
+      method: "POST",
+      headers: {
+        apikey: CONFIG.SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${CONFIG.SUPABASE_SERVICE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates",
+        "Content-Length": Buffer.byteLength(body),
+      },
+    }
+
+    const response = await httpsRequest(options, body)
+
+    console.log(`[Supabase] Ответ от ${tableName}:`, response.status, response.text())
+
+    if (response.ok || response.status === 201) {
+      console.log(`[Supabase] Лицензия ${license.key} синхронизирована в ${tableName}`)
+      return true
+    } else {
+      console.error(`[Supabase] Ошибка ${tableName}:`, response.status, response.text())
       return false
     }
-
-    console.log(`[Supabase] Лицензия ${license.key} синхронизирована в ${tableName}`)
-    return true
   } catch (error) {
-    console.error("[Supabase] Ошибка:", error.message)
+    console.error("[Supabase] Exception:", error)
     return false
   }
 }
 
+async function updateLicenseStatusInSupabase(key, status, platform = "pc") {
+  try {
+    const tableName = platform === "mobile" ? "licence_mobail" : "licenses"
+
+    let body, filterKey
+    if (platform === "mobile") {
+      body = JSON.stringify({ is_active: status === "active" })
+      filterKey = "license_key"
+    } else {
+      body = JSON.stringify({ status: status })
+      filterKey = "key"
+    }
+
+    const options = {
+      hostname: "fbasfoutfoqqriinghht.supabase.co",
+      path: `/rest/v1/${tableName}?${filterKey}=eq.${encodeURIComponent(key)}`,
+      method: "PATCH",
+      headers: {
+        apikey: CONFIG.SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${CONFIG.SUPABASE_SERVICE_KEY}`,
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+      },
+    }
+
+    const response = await httpsRequest(options, body)
+
+    if (response.ok) {
+      console.log(`Статус лицензии ${key} обновлен в ${tableName}`)
+      return true
+    } else {
+      console.error(`Ошибка обновления в ${tableName}:`, response.status, response.text())
+      return false
+    }
+  } catch (error) {
+    console.error("Ошибка обновления статуса:", error.message)
+    return false
+  }
+}
+
+// Генерация лицензионного ключа
 function generateLicenseKey(platform = "pc") {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
   const generatePart = () => {
@@ -100,14 +220,19 @@ function generateLicenseKey(platform = "pc") {
     return part
   }
 
-  const prefix = platform === "mobile" ? "PS" : "PC"
+  const prefix = platform === "mobile" ? "MB" : "PC"
   return `${prefix}-${generatePart()}-${generatePart()}-${generatePart()}`
 }
 
+// Создание новой лицензии
 function createLicense(userId, username, platform = "pc") {
   const key = generateLicenseKey(platform)
   const now = new Date()
   const expiresAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000)
+
+  console.log(`[v0] Creating license for ${platform}:`)
+  console.log(`[v0] Created at: ${now.toISOString()} (${now.toLocaleDateString("ru-RU")})`)
+  console.log(`[v0] Expires at: ${expiresAt.toISOString()} (${expiresAt.toLocaleDateString("ru-RU")})`)
 
   const license = {
     key,
@@ -126,11 +251,13 @@ function createLicense(userId, username, platform = "pc") {
   return license
 }
 
+// Проверка лицензии
 function checkLicense(key) {
   const license = licenses[key]
   if (!license) return { valid: false, message: "Ключ не найден" }
   if (license.status !== "active") return { valid: false, message: "Лицензия деактивирована" }
 
+  // Проверка срока действия
   if (license.expiresAt) {
     const expiresDate = new Date(license.expiresAt)
     if (new Date() > expiresDate) {
@@ -147,6 +274,7 @@ function checkUserPremium(userId) {
   for (const key in licenses) {
     const license = licenses[key]
     if (license.userId.toString() === userId.toString() && license.status === "active") {
+      // Проверяем срок действия
       if (license.expiresAt) {
         const expiresDate = new Date(license.expiresAt)
         if (new Date() > expiresDate) {
@@ -163,6 +291,7 @@ function checkUserPremium(userId) {
 
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id
+  const username = msg.from.username || msg.from.first_name
 
   const welcomeMessage = `
 Добро пожаловать в ProxySwitcher Bot!
@@ -229,6 +358,8 @@ bot.onText(/\/buy/, (msg) => {
 bot.onText(/\/proxy/, (msg) => {
   const chatId = msg.chat.id
 
+  pendingOrders[msg.from.id] = { type: "proxy", chatId }
+
   const proxyMessage = `
 Покупка индивидуального прокси
 
@@ -260,10 +391,19 @@ bot.onText(/\/proxy/, (msg) => {
     ],
   }
 
-  bot.sendMessage(chatId, proxyMessage, { reply_markup: keyboard })
+  bot.sendMessage(chatId, proxyMessage, {
+    reply_markup: keyboard,
+  })
+})
+
+// Команда /paid или кнопка "Я оплатил"
+bot.onText(/\/paid/, (msg) => {
+  handlePaymentConfirmation(msg.chat.id, msg.from)
 })
 
 bot.on("callback_query", (query) => {
+  console.log("[v0] callback_query received:", query.data)
+
   if (query.data === "platform_pc" || query.data === "platform_mobile") {
     const platform = query.data === "platform_mobile" ? "mobile" : "pc"
     const userId = query.from.id
@@ -311,8 +451,16 @@ bot.on("callback_query", (query) => {
     return
   }
 
+  if (query.data === "cancel_support") {
+    delete supportTickets[query.from.id]
+    bot.sendMessage(query.message.chat.id, "Обращение отменено. Если понадобится помощь - напишите /support")
+    bot.answerCallbackQuery(query.id)
+    return
+  }
+
   if (query.data.startsWith("paid_premium_")) {
     const platform = query.data.split("_")[2]
+    console.log(`[v0] paid_premium_${platform} button clicked by user:`, query.from.id)
     waitingPayment[query.from.id] = {
       type: "premium",
       platform: platform,
@@ -335,7 +483,32 @@ bot.on("callback_query", (query) => {
     return
   }
 
+  if (query.data === "paid" || query.data === "paid_premium") {
+    console.log("[v0] paid_premium button clicked by user:", query.from.id)
+    waitingPayment[query.from.id] = {
+      type: "premium",
+      platform: "pc",
+      chatId: query.message.chat.id,
+      username: query.from.username,
+      firstName: query.from.first_name,
+      timestamp: Date.now(),
+    }
+    bot.answerCallbackQuery(query.id, { text: "Отправьте скриншот чека" })
+    bot.sendMessage(
+      query.message.chat.id,
+      `Подтверждение оплаты Premium подписки
+
+Пожалуйста, отправьте скриншот или фото чека об оплате.
+
+После проверки администратором вы получите лицензионный ключ.
+
+Обычно проверка занимает до 30 минут.`,
+    )
+    return
+  }
+
   if (query.data === "paid_proxy") {
+    console.log("[v0] paid_proxy button clicked by user:", query.from.id)
     waitingPayment[query.from.id] = {
       type: "proxy",
       chatId: query.message.chat.id,
@@ -362,7 +535,7 @@ bot.on("callback_query", (query) => {
     const type = parts[1]
     const userId = parts[2]
     const chatId = parts[3]
-    const platform = parts[4] || "pc" // Добавил платформу
+    const platform = parts[4] || "pc"
     handleApproval(query, userId, chatId, true, type, platform)
     bot.answerCallbackQuery(query.id)
     return
@@ -374,13 +547,6 @@ bot.on("callback_query", (query) => {
     const userId = parts[2]
     const chatId = parts[3]
     handleApproval(query, userId, chatId, false, type)
-    bot.answerCallbackQuery(query.id)
-    return
-  }
-
-  if (query.data === "cancel_support") {
-    delete supportTickets[query.from.id]
-    bot.sendMessage(query.message.chat.id, "Обращение отменено. Если понадобится помощь - напишите /support")
     bot.answerCallbackQuery(query.id)
     return
   }
@@ -417,6 +583,30 @@ bot.on("callback_query", (query) => {
   }
 })
 
+function handlePaymentConfirmation(chatId, user, type = "premium") {
+  const productName = type === "proxy" ? "индивидуального прокси" : "Premium подписки"
+
+  waitingPayment[user.id] = {
+    type,
+    chatId,
+    username: user.username,
+    firstName: user.first_name,
+    timestamp: Date.now(),
+  }
+
+  const confirmMessage = `
+Подтверждение оплаты ${productName}
+
+Пожалуйста, отправьте скриншот или фото чека об оплате.
+
+После проверки администратором вы получите ${type === "proxy" ? "данные прокси" : "лицензионный ключ"}.
+
+Обычно проверка занимает до 30 минут.
+  `
+
+  bot.sendMessage(chatId, confirmMessage)
+}
+
 function handleApproval(query, userId, chatId, approved, type = "premium", platform = "pc") {
   if (query.from.id.toString() !== CONFIG.ADMIN_ID.toString()) {
     bot.answerCallbackQuery(query.id, { text: "У вас нет прав" })
@@ -437,20 +627,20 @@ function handleApproval(query, userId, chatId, approved, type = "premium", platf
       if (isMediaMessage) {
         bot
           .editMessageCaption(waitText, {
-            chat_id: query.message.chat.id,
+            chat_id: chatId,
             message_id: query.message.message_id,
           })
           .catch(() => {
-            bot.sendMessage(query.message.chat.id, waitText)
+            bot.sendMessage(chatId, waitText)
           })
       } else {
         bot
           .editMessageText(waitText, {
-            chat_id: query.message.chat.id,
+            chat_id: chatId,
             message_id: query.message.message_id,
           })
           .catch(() => {
-            bot.sendMessage(query.message.chat.id, waitText)
+            bot.sendMessage(chatId, waitText)
           })
       }
     } else {
@@ -483,20 +673,20 @@ ${license.key}
       if (isMediaMessage) {
         bot
           .editMessageCaption(successText, {
-            chat_id: query.message.chat.id,
+            chat_id: chatId,
             message_id: query.message.message_id,
           })
           .catch(() => {
-            bot.sendMessage(query.message.chat.id, successText)
+            bot.sendMessage(chatId, successText)
           })
       } else {
         bot
           .editMessageText(successText, {
-            chat_id: query.message.chat.id,
+            chat_id: chatId,
             message_id: query.message.message_id,
           })
           .catch(() => {
-            bot.sendMessage(query.message.chat.id, successText)
+            bot.sendMessage(chatId, successText)
           })
       }
     }
@@ -508,20 +698,20 @@ ${license.key}
     if (isMediaMessage) {
       bot
         .editMessageCaption(rejectText, {
-          chat_id: query.message.chat.id,
+          chat_id: chatId,
           message_id: query.message.message_id,
         })
         .catch(() => {
-          bot.sendMessage(query.message.chat.id, rejectText)
+          bot.sendMessage(chatId, rejectText)
         })
     } else {
       bot
         .editMessageText(rejectText, {
-          chat_id: query.message.chat.id,
+          chat_id: chatId,
           message_id: query.message.message_id,
         })
         .catch(() => {
-          bot.sendMessage(query.message.chat.id, rejectText)
+          bot.sendMessage(chatId, rejectText)
         })
     }
   }
@@ -533,6 +723,7 @@ bot.on("photo", (msg) => {
   const userId = msg.from.id
   const chatId = msg.chat.id
 
+  // Проверяем ожидает ли пользователь подтверждение оплаты
   const pending = waitingPayment[userId]
 
   if (pending) {
@@ -566,6 +757,7 @@ bot.on("photo", (msg) => {
       ],
     }
 
+    // Пересылаем фото админу с кнопками
     const photoId = msg.photo[msg.photo.length - 1].file_id
     bot.sendPhoto(CONFIG.ADMIN_ID, photoId, {
       caption: caption,
@@ -573,8 +765,11 @@ bot.on("photo", (msg) => {
     })
 
     bot.sendMessage(chatId, "Чек получен! Ожидайте подтверждения от администратора.")
+
+    // Удаляем из ожидающих
     delete waitingPayment[userId]
   } else {
+    // Если нет ожидающей оплаты - может это для поддержки
     if (supportTickets[userId]) {
       const ticket = supportTickets[userId]
       const premiumStatus = checkUserPremium(userId)
@@ -665,7 +860,7 @@ bot.onText(/\/sendproxy (\d+) (.+)/, (msg, match) => {
   }
 
   const userId = match[1]
-  const proxyData = match[2]
+  const proxyData = match[2] // IP:PORT:LOGIN:PASSWORD
 
   const parts = proxyData.split(":")
   if (parts.length < 2) {
@@ -723,7 +918,7 @@ bot.onText(/\/check (.+)/, (msg, match) => {
 
 bot.onText(/^\/check$/, (msg) => {
   const chatId = msg.chat.id
-  bot.sendMessage(chatId, "Для проверки ключа введите:\n/check ВАШ-КЛЮЧ\n\nНапример:\n/check PS-XXXXX-XXXXX-XXXXX")
+  bot.sendMessage(chatId, "Для проверки ключа введите:\n/check ВАШ-КЛЮЧ\n\nНапример:\n/check PC-XXXXX-XXXXX-XXXXX")
 })
 
 bot.onText(/\/support/, (msg) => {
@@ -814,6 +1009,175 @@ ${msg.text}`
   }
 })
 
+bot.onText(/\/revoke (.+)/, (msg, match) => {
+  // Проверка что команду отправил админ
+  if (msg.from.id.toString() !== CONFIG.ADMIN_ID.toString()) {
+    bot.sendMessage(msg.chat.id, "У вас нет прав для выполнения этой команды.")
+    return
+  }
+
+  const key = match[1].trim().toUpperCase()
+
+  if (!licenses[key]) {
+    bot.sendMessage(msg.chat.id, `Лицензия ${key} не найдена.`)
+    return
+  }
+
+  const license = licenses[key]
+  const userId = license.userId
+  const username = license.username
+
+  // Деактивируем лицензию
+  license.status = "revoked"
+  license.revokedAt = new Date().toISOString()
+  license.revokedBy = msg.from.id
+  saveLicenses()
+  // Обновляем статус лицензии в Supabase
+  updateLicenseStatusInSupabase(key, "revoked", license.platform)
+
+  bot.sendMessage(
+    msg.chat.id,
+    `Лицензия успешно отозвана!\n\nКлюч: ${key}\nПользователь: @${username || "неизвестен"} (ID: ${userId})\nСтатус: Отозвана`,
+  )
+
+  // Уведомляем пользователя
+  if (userId) {
+    bot
+      .sendMessage(
+        userId,
+        `Ваша Premium подписка была отозвана.\n\nКлюч: ${key}\n\nЕсли вы считаете что это ошибка, свяжитесь с поддержкой /support`,
+      )
+      .catch(() => {
+        // Пользователь мог заблокировать бота
+      })
+  }
+})
+
+bot.onText(/\/licenses/, async (msg) => {
+  const chatId = msg.chat.id
+  const userId = msg.from.id.toString()
+
+  if (userId !== CONFIG.ADMIN_ID) {
+    bot.sendMessage(chatId, "У вас нет доступа к этой команде.")
+    return
+  }
+
+  try {
+    console.log("[v0] Загрузка лицензий из Supabase...")
+
+    const hostname = CONFIG.SUPABASE_URL.replace("https://", "").replace("http://", "")
+
+    const pcOptions = {
+      hostname: hostname,
+      path: "/rest/v1/licenses?select=*",
+      method: "GET",
+      headers: {
+        apikey: CONFIG.SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${CONFIG.SUPABASE_SERVICE_KEY}`,
+        "Content-Type": "application/json",
+      },
+    }
+
+    const mobileOptions = {
+      hostname: hostname,
+      path: "/rest/v1/licence_mobail?select=*",
+      method: "GET",
+      headers: {
+        apikey: CONFIG.SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${CONFIG.SUPABASE_SERVICE_KEY}`,
+        "Content-Type": "application/json",
+      },
+    }
+
+    const [pcResponse, mobileResponse] = await Promise.all([httpsRequest(pcOptions), httpsRequest(mobileOptions)])
+
+    console.log("[v0] ПК ответ от Supabase:", { ok: pcResponse.ok, status: pcResponse.status })
+    console.log("[v0] Мобильный ответ от Supabase:", { ok: mobileResponse.ok, status: mobileResponse.status })
+
+    const pcLicenses = pcResponse.ok ? JSON.parse(pcResponse.text()) : []
+    const mobileLicenses = mobileResponse.ok ? JSON.parse(mobileResponse.text()) : []
+
+    console.log("[v0] ПК лицензий:", Array.isArray(pcLicenses) ? pcLicenses.length : 0)
+    console.log("[v0] Мобильных лицензий:", Array.isArray(mobileLicenses) ? mobileLicenses.length : 0)
+
+    const activePc = Array.isArray(pcLicenses) ? pcLicenses.filter((l) => l.status === "active") : []
+    const activeMobile = Array.isArray(mobileLicenses) ? mobileLicenses.filter((l) => l.is_active === true) : []
+
+    let message = "🎫 АКТИВНЫЕ ЛИЦЕНЗИИ\n\n"
+
+    message += "<pre>"
+    message += "💻 ПК                                  📱 Mobile\n"
+    message += "======================================== ========================================\n"
+
+    const maxRows = Math.max(activePc.length, activeMobile.length)
+
+    if (maxRows === 0) {
+      message += "💻 ПК ЛИЦЕНЗИЙ: нет                      📱 МОБИЛЬНЫЕ ЛИЦЕНЗИИ: нет"
+    } else {
+      for (let i = 0; i < maxRows; i++) {
+        const pc = activePc[i]
+        const mobile = activeMobile[i]
+
+        let leftColumn = ""
+        let rightColumn = ""
+
+        if (pc) {
+          const pcKey = pc.key.substring(0, 18)
+          const pcUser = (pc.username || "unknown").substring(0, 10)
+          const pcDays = Math.ceil((new Date(pc.expires_at) - new Date()) / (1000 * 60 * 60 * 24))
+          leftColumn = `${pcKey} ${pcUser} ${pcDays}д`
+        } else {
+          leftColumn = " ".repeat(40)
+        }
+
+        if (mobile) {
+          const mobKey = mobile.license_key.substring(0, 18)
+          const mobUser = (mobile.telegram_username || "unknown").substring(0, 10)
+          const mobDays = Math.ceil((new Date(mobile.expires_at) - new Date()) / (1000 * 60 * 60 * 24))
+          rightColumn = `${mobKey} ${mobUser} ${mobDays}д`
+        }
+
+        message += leftColumn.padEnd(40) + "   " + rightColumn + "\n"
+      }
+    }
+
+    message += "</pre>\n"
+
+    bot.sendMessage(chatId, message, { parse_mode: "HTML" })
+  } catch (error) {
+    console.error("[v0] Ошибка загрузки лицензий:", error)
+    bot.sendMessage(chatId, "❌ Ошибка загрузки лицензий из базы данных")
+  }
+})
+
+bot.onText(/\/finduser (\d+)/, (msg, match) => {
+  if (msg.from.id.toString() !== CONFIG.ADMIN_ID.toString()) {
+    bot.sendMessage(msg.chat.id, "У вас нет прав для выполнения этой команды.")
+    return
+  }
+
+  const userId = match[1]
+  const userLicenses = Object.values(licenses).filter((l) => l.userId.toString() === userId)
+
+  if (userLicenses.length === 0) {
+    bot.sendMessage(msg.chat.id, `Лицензии для пользователя ${userId} не найдены.`)
+    return
+  }
+
+  let message = `Лицензии пользователя ${userId}:\n\n`
+
+  userLicenses.forEach((license, index) => {
+    const expiresDate = license.expiresAt ? new Date(license.expiresAt).toLocaleDateString("ru-RU") : "Бессрочно"
+    message += `${index + 1}. ${license.key}\n`
+    message += `   Статус: ${license.status === "active" ? "Активна" : license.status === "revoked" ? "Отозвана" : "Истекла"}\n`
+    message += `   Истекает: ${expiresDate}\n\n`
+  })
+
+  message += `\nДля отзыва: /revoke КЛЮЧ`
+
+  bot.sendMessage(msg.chat.id, message)
+})
+
 bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id
   const isAdmin = msg.from.id.toString() === CONFIG.ADMIN_ID.toString()
@@ -847,6 +1211,7 @@ Telegram канал: @proxyswither
 /finduser <ID> - Найти лицензии пользователя
 /revoke <ключ> - Отозвать лицензию
 /sendproxy <userID> <данные> - Отправить прокси
+/admin_generate - Сгенерировать тестовый ключ
 `
   }
 
@@ -855,4 +1220,124 @@ Telegram канал: @proxyswither
 
 loadLicenses()
 
-console.log("Bot started successfully!")
+const server = http.createServer((req, res) => {
+  const chatId = req.headers["chatid"] // Declare chatId variable
+  res.setHeader("Access-Control-Allow-Origin", "*")
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS")
+  res.setHeader("Content-Type", "application/json; charset=utf-8")
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(200)
+    res.end()
+    return
+  }
+
+  const url = new URL(req.url, `http://${req.headers.host}`)
+
+  if (url.pathname === "/check" && req.method === "GET") {
+    const key = url.searchParams.get("key")
+
+    if (!key) {
+      res.writeHead(400)
+      res.end(JSON.stringify({ error: "Key required" }))
+      return
+    }
+
+    const result = checkLicense(key.toUpperCase())
+    res.writeHead(200)
+    res.end(JSON.stringify(result))
+    return
+  }
+
+  if (url.pathname === "/status" && req.method === "GET") {
+    const key = url.searchParams.get("key")
+
+    if (!key) {
+      res.writeHead(400)
+      res.end(JSON.stringify({ error: "Key required" }))
+      return
+    }
+
+    const license = licenses[key.toUpperCase()]
+
+    if (!license) {
+      res.writeHead(200)
+      res.end(JSON.stringify({ exists: false }))
+      return
+    }
+
+    res.writeHead(200)
+    res.end(
+      JSON.stringify({
+        exists: true,
+        status: license.status,
+        expiresAt: license.expiresAt,
+        revoked: license.status === "revoked",
+        revokedAt: license.revokedAt || null,
+      }),
+    )
+    return
+  }
+
+  res.writeHead(404)
+  res.end(JSON.stringify({ error: "Not found" }))
+})
+
+server.listen(CONFIG.API_PORT, CONFIG.API_HOST, () => {
+  console.log(`API лицензий запущен на http://${CONFIG.API_HOST}:${CONFIG.API_PORT}`)
+})
+
+console.log("ProxySwitcher Bot запущен!")
+console.log("Команды бота установлены в меню Telegram")
+
+function checkExpiringLicenses() {
+  const now = new Date()
+  const oneDayMs = 24 * 60 * 60 * 1000
+
+  for (const key in licenses) {
+    const license = licenses[key]
+
+    if (license.status !== "active" || !license.expiresAt) continue
+
+    const expiresDate = new Date(license.expiresAt)
+    const timeLeft = expiresDate.getTime() - now.getTime()
+
+    // Если осталось меньше 1 дня и уведомление еще не отправлено
+    if (timeLeft > 0 && timeLeft <= oneDayMs && !expirationNotified.has(key)) {
+      const hoursLeft = Math.floor(timeLeft / (60 * 60 * 1000))
+
+      // Уведомление админу
+      bot.sendMessage(
+        CONFIG.ADMIN_ID,
+        `⚠️ *Истекает подписка!*\n\n` +
+          `Пользователь: ${license.username ? "@" + license.username : "ID: " + license.userId}\n` +
+          `ID: \`${license.userId}\`\n` +
+          `Ключ: \`${key}\`\n` +
+          `Истекает через: ${hoursLeft} ч.\n` +
+          `Дата: ${expiresDate.toLocaleDateString("ru-RU")}`,
+        { parse_mode: "Markdown" },
+      )
+
+      // Уведомление пользователю
+      bot
+        .sendMessage(
+          license.userId,
+          `⚠️ *Ваша Premium подписка истекает!*\n\n` +
+            `Осталось менее 24 часов.\n` +
+            `Дата окончания: ${expiresDate.toLocaleDateString("ru-RU")}\n\n` +
+            `Для продления используйте /buy`,
+          { parse_mode: "Markdown" },
+        )
+        .catch(() => {})
+
+      // Отмечаем что уведомление отправлено
+      expirationNotified.add(key)
+      fs.writeFileSync("./expiration_notified.json", JSON.stringify([...expirationNotified]))
+    }
+  }
+}
+
+setInterval(checkExpiringLicenses, 60 * 60 * 1000)
+
+// Проверка при запуске
+setTimeout(checkExpiringLicenses, 5000)
