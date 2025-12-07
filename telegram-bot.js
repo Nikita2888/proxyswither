@@ -1106,13 +1106,13 @@ bot.onText(/\/licenses/, async (msg) => {
     let message = "🎫 АКТИВНЫЕ ЛИЦЕНЗИИ\n\n"
 
     message += "<pre>"
-    message += "💻 ПК                                  📱 Mobile\n"
-    message += "======================================== ========================================\n"
+    message += "💻 ПК                                       📱 Mobile\n"
+    message += "=========================================== ===========================================\n"
 
     const maxRows = Math.max(activePc.length, activeMobile.length)
 
     if (maxRows === 0) {
-      message += "💻 ПК ЛИЦЕНЗИЙ: нет                      📱 МОБИЛЬНЫЕ ЛИЦЕНЗИИ: нет"
+      message += "💻 ПК ЛИЦЕНЗИЙ: нет                         📱 МОБИЛЬНЫЕ ЛИЦЕНЗИИ: нет"
     } else {
       for (let i = 0; i < maxRows; i++) {
         const pc = activePc[i]
@@ -1122,22 +1122,22 @@ bot.onText(/\/licenses/, async (msg) => {
         let rightColumn = ""
 
         if (pc) {
-          const pcKey = pc.key.substring(0, 18)
+          const pcKey = pc.key
           const pcUser = (pc.username || "unknown").substring(0, 10)
           const pcDays = Math.ceil((new Date(pc.expires_at) - new Date()) / (1000 * 60 * 60 * 24))
           leftColumn = `${pcKey} ${pcUser} ${pcDays}д`
         } else {
-          leftColumn = " ".repeat(40)
+          leftColumn = " ".repeat(43)
         }
 
         if (mobile) {
-          const mobKey = mobile.license_key.substring(0, 18)
+          const mobKey = mobile.license_key
           const mobUser = (mobile.telegram_username || "unknown").substring(0, 10)
           const mobDays = Math.ceil((new Date(mobile.expires_at) - new Date()) / (1000 * 60 * 60 * 24))
           rightColumn = `${mobKey} ${mobUser} ${mobDays}д`
         }
 
-        message += leftColumn.padEnd(40) + "   " + rightColumn + "\n"
+        message += leftColumn.padEnd(43) + "   " + rightColumn + "\n"
       }
     }
 
